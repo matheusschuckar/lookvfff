@@ -4,9 +4,10 @@
 import { useEffect, useMemo, useState, Suspense } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Eye, EyeOff } from "lucide-react"; // Adicionado para os ícones
+import { Eye, EyeOff, Loader2 } from "lucide-react"; // Certifique-se de que Loader2 foi adicionado
 
-type Step = "request" | "verify" | "success"; // Adicionei 'success' para o fluxo de redefinição
+// Adicionei "reset" para o caso de o usuário ser redirecionado após o token de recuperação
+type Step = "request" | "verify" | "reset"; 
 
 export const dynamic = "force-dynamic";
 
@@ -19,9 +20,8 @@ function OtpPageInner() {
   const next = useMemo(() => {
     try {
       const decoded = decodeURIComponent(nextRaw);
-      // Evita redirecionamento para URLs externas
-      // CORRIGIDO: Removido escape duplo (\\/\\/ -> ://)
-      if (/^https?:\/\//i.test(decoded)) return "/"; 
+      // CORRIGIDO: Removido escape duplo (\\/\\/ -> ://) que causava o lexing error
+      if (/^https?:\/\//i.test(decoded)) return "/";
       return decoded || "/";
     } catch {
       return "/";
@@ -44,21 +44,43 @@ function OtpPageInner() {
     (async () => {
       const { data } = await supabase.auth.getSession();
       if (data?.session?.user) router.replace(next);
+      
+      // Se tiver 'type=recovery' na URL, vai direto para 'verify'
+      const type = search?.get("type");
+      if (type === "recovery" || type === "otp") {
+          setStep("verify");
+      }
     })();
-  }, [router, next]);
+  }, [router, next, search]);
+  
+  // Se o usuário chegar com um token de recuperação na URL, usa o useEffect para processá-lo.
+  useEffect(() => {
+      // Supabase trata o token de recuperação automaticamente se estiver presente na URL.
+      // Apenas precisamos verificar o estado da sessão.
+      (async () => {
+          const { data } = await supabase.auth.getSession();
+          if (data?.session?.user) {
+              setStep("reset"); // Se estiver logado após recovery, vai para resetar senha.
+          }
+      })();
+  }, []); // Roda uma vez.
 
-  // Handle: Enviar o e-mail de recuperação
+  // 1. Request OTP
   const handleRequest = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
+
     setLoading(true);
     setErr(null);
     setOk(null);
 
-    // Tipagem: remove `as any` e confia no tipo inferido pelo Supabase
-    const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/auth/otp?next=${encodeURIComponent(
-        nextRaw
-      )}`,
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        emailRedirectTo: `${window.location.origin}/auth/otp?next=${encodeURIComponent(
+          nextRaw
+        )}&type=otp`,
+      },
     });
 
     setLoading(false);
@@ -68,151 +90,195 @@ function OtpPageInner() {
       return;
     }
 
-    setOk("Email de recuperação enviado! Verifique sua caixa de entrada.");
+    setOk("Magic link enviado! Verifique seu e-mail.");
     setStep("verify");
   };
 
-  // Handle: Verificar código e setar nova senha
+  // 2. Verify OTP (token)
   const handleVerify = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
+
     setLoading(true);
     setErr(null);
-    setOk(null);
 
-    // Tipagem: remove `as any` e confia no tipo inferido
-    const { data, error } = await supabase.auth.verifyOtp({
+    const { error, data } = await supabase.auth.verifyOtp({
       email,
       token: code,
-      type: "recovery",
-    });
-    
-    // CORRIGIDO: Variável vData estava declarada, mas nunca usada. Foi removida.
-    // const vData = data; // Linha 92 (erro de no-unused-vars)
-
-    if (error) {
-      setLoading(false);
-      setErr("Código inválido ou expirado.");
-      return;
-    }
-
-    // Se o código for válido, trocamos a senha
-    // Tipagem: remove `as any` e confia no tipo inferido
-    const { data: updateData, error: updateError } = await supabase.auth.updateUser({
-      password,
+      type: "email", // Use 'email' para magic link ou OTP
     });
 
     setLoading(false);
 
-    if (updateError) {
-      setErr(updateError.message);
+    if (error) {
+      setErr(error.message);
       return;
     }
-
-    setOk("Sua senha foi atualizada com sucesso.");
-    setStep("success");
-    // Redireciona após sucesso
-    setTimeout(() => {
+    
+    // Se a verificação for bem-sucedida, o usuário estará logado.
+    // Redireciona para `next`.
+    if (data.session) {
         router.replace(next);
-    }, 1500);
+        return;
+    }
+
+    // Se a verificação foi de `recovery` e a sessão foi estabelecida
+    // o usuário já deve ter sido encaminhado para o estado `reset` via useEffect (abaixo)
+    // Se chegou aqui e não tem sessão, algo deu errado.
+    setErr("Verificação bem-sucedida, mas a sessão não foi estabelecida.");
+
   };
+  
+  // 3. Reset Password (após recovery)
+  const handleReset = async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (loading) return;
+      
+      setLoading(true);
+      setErr(null);
+      setOk(null);
+      
+      const { error } = await supabase.auth.updateUser({ password });
+      
+      setLoading(false);
+      
+      if (error) {
+          setErr(error.message);
+          return;
+      }
+      
+      setOk("Senha atualizada com sucesso! Redirecionando...");
+      setTimeout(() => router.replace(next), 1000);
+  };
+
 
   return (
     <main className="min-h-screen bg-neutral-50 p-5 pt-10">
-      <div className="max-w-sm mx-auto">
-        <h1 className="text-4xl font-semibold tracking-tight text-black">
-          {step === "request" && "Recuperar"}
-          {step === "verify" && "Nova Senha"}
-          {step === "success" && "Sucesso!"}
-        </h1>
-        <p className="mt-1 text-sm text-neutral-500">
-          {step === "request" &&
-            "Informe seu e-mail para receber o link de recuperação de senha."}
-          {step === "verify" &&
-            "Digite o código que você recebeu e a sua nova senha."}
-          {step === "success" &&
-            "Você será redirecionado em breve..."}
-        </p>
+      <h1 className="text-4xl font-semibold tracking-tight text-black">
+        {step === "request" && "Login ou Recuperação"}
+        {step === "verify" && "Verificar código"}
+        {step === "reset" && "Definir nova senha"}
+      </h1>
+      <p className="mt-1 text-sm text-neutral-600">
+        {step === "request" && "Insira seu e-mail para receber o link ou código de acesso."}
+        {step === "verify" && "Cheque sua caixa de entrada e spam. O código expira em 5 minutos."}
+        {step === "reset" && "Crie uma nova senha forte."}
+      </p>
 
-        <div className="mt-8 space-y-4">
-          {step === "request" && (
-            <form onSubmit={handleRequest} className="space-y-4">
-              <div>
-                <label
-                  htmlFor="email"
-                  className="text-xs font-medium text-neutral-600"
-                >
-                  Email
-                </label>
-                <input
-                  type="email"
-                  id="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  disabled={loading}
-                  className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
-                />
-              </div>
+      <div className="mt-8 max-w-sm">
+        {/* Formulário 1: Request OTP/Magic Link */}
+        {step === "request" && (
+          <form onSubmit={handleRequest} className="space-y-4">
+            <div>
+              <label className="text-sm font-medium text-neutral-700">
+                E-mail
+              </label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                className="mt-1 block w-full rounded-lg border border-neutral-300 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
+                placeholder="seu@email.com"
+                autoFocus
+              />
+            </div>
 
-              {err && (
-                <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
-                  {err}
-                </p>
+            {err && (
+              <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+                {err}
+              </p>
+            )}
+            {ok && (
+              <p className="rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
+                {ok}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm transition active:scale-[0.99] disabled:opacity-60"
+            >
+              {loading ? (
+                <Loader2 className="animate-spin h-5 w-5 mx-auto" />
+              ) : (
+                "Enviar link/código de acesso"
               )}
+            </button>
+          </form>
+        )}
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm transition active:scale-[0.99] disabled:opacity-60"
-              >
-                {loading ? "Enviando…" : "Receber código"}
-              </button>
-            </form>
-          )}
-
-          {step === "verify" && (
+        {/* Formulário 2: Verify OTP */}
+        {step === "verify" && (
             <form onSubmit={handleVerify} className="space-y-4">
-              {/* Campo Código */}
-              <div>
-                <label
-                  htmlFor="code"
-                  className="text-xs font-medium text-neutral-600"
-                >
-                  Código (Token)
-                </label>
-                <input
-                  type="text"
-                  id="code"
-                  required
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  disabled={loading}
-                  className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
-                />
-              </div>
+                <div>
+                    <label className="text-sm font-medium text-neutral-700">
+                        Código (Token)
+                    </label>
+                    <input
+                        type="text"
+                        value={code}
+                        onChange={(e) => setCode(e.target.value)}
+                        required
+                        className="mt-1 block w-full rounded-lg border border-neutral-300 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
+                        placeholder="123456"
+                        autoFocus
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                    />
+                </div>
+                
+                {err && (
+                  <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {err}
+                  </p>
+                )}
 
-              {/* Campo Senha */}
-              <div className="relative">
-                <label
-                  htmlFor="password"
-                  className="text-xs font-medium text-neutral-600"
+                <button
+                    type="submit"
+                    disabled={loading}
+                    className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm transition active:scale-[0.99] disabled:opacity-60"
                 >
+                    {loading ? (
+                        <Loader2 className="animate-spin h-5 w-5 mx-auto" />
+                    ) : (
+                        "Verificar e continuar"
+                    )}
+                </button>
+                
+                <button 
+                    type="button" 
+                    onClick={() => setStep("request")}
+                    className="mt-4 w-full text-xs text-neutral-600 underline"
+                >
+                    Mudar e-mail ou reenviar
+                </button>
+            </form>
+        )}
+        
+        {/* Formulário 3: Reset Password (Apenas se o token recovery for válido) */}
+        {step === "reset" && (
+            <form onSubmit={handleReset} className="space-y-4">
+              <div>
+                <label className="text-sm font-medium text-neutral-700">
                   Nova Senha
                 </label>
-                <input
-                  type={showPw ? "text" : "password"}
-                  id="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  disabled={loading}
-                  className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
-                />
-                <div className="absolute inset-y-0 right-0 top-6 flex items-center pr-3">
+                <div className="relative mt-1">
+                  <input
+                    type={showPw ? "text" : "password"}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    minLength={6}
+                    className="block w-full rounded-lg border border-neutral-300 px-4 py-3 pr-12 text-sm shadow-sm focus:border-black focus:ring-black"
+                    placeholder="Mínimo 6 caracteres"
+                    autoFocus
+                  />
                   <button
                     type="button"
                     onClick={() => setShowPw(!showPw)}
-                    className="text-neutral-500"
+                    className="absolute inset-y-0 right-0 flex items-center pr-3 text-neutral-400"
                   >
                     {showPw ? (
                       <EyeOff className="h-5 w-5" />
@@ -239,17 +305,14 @@ function OtpPageInner() {
                 disabled={loading}
                 className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm transition active:scale-[0.99] disabled:opacity-60"
               >
-                {loading ? "Validando…" : "Definir nova senha"}
+                {loading ? (
+                    <Loader2 className="animate-spin h-5 w-5 mx-auto" />
+                ) : (
+                    "Definir nova senha"
+                )}
               </button>
             </form>
           )}
-
-          {step === "success" && (
-            <p className="rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
-                Sua senha foi redefinida. Redirecionando...
-            </p>
-          )}
-        </div>
 
         <div className="mt-4 flex justify-center">
           <button
@@ -258,7 +321,7 @@ function OtpPageInner() {
             }
             className="text-xs text-neutral-600 underline"
           >
-            Voltar para o login
+            Voltar ao login
           </button>
         </div>
       </div>
@@ -272,11 +335,9 @@ export default function OtpPage() {
       fallback={
         <main className="min-h-screen bg-neutral-50 p-5 pt-10">
           <h1 className="text-4xl font-semibold tracking-tight text-black">
-            Recuperar
+            Recuperação
           </h1>
-          <p className="mt-1 text-sm text-neutral-500">
-            Carregando informações...
-          </p>
+          <p className="mt-1 text-sm text-neutral-600">Carregando...</p>
         </main>
       }
     >

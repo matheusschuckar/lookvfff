@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState, Suspense } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useState, Suspense } from "react";
+import { useRouter } from "next/navigation"; // CORRIGIDO: useSearchParams e useMemo removidos
 import { supabase } from "@/lib/supabaseClient";
 import PhoneInput from "react-phone-input-2";
 import "react-phone-input-2/lib/style.css";
 
+// Definindo o tipo de Profile
 type Profile = {
   id: string;
   name: string | null;
@@ -37,415 +38,387 @@ function cpfValid(cpf: string) {
   let d1 = 11 - (sum % 11);
   if (d1 >= 10) d1 = 0;
   if (d1 !== parseInt(s[9])) return false;
+
   sum = 0;
   for (let i = 0; i < 10; i++) sum += parseInt(s[i]) * (11 - i);
   let d2 = 11 - (sum % 11);
   if (d2 >= 10) d2 = 0;
-  return d2 === parseInt(s[10]);
+  if (d2 !== parseInt(s[10])) return false;
+  return true;
 }
 
-// ViaCEP
-async function fetchAddress(cep: string) {
-  try {
-    const res = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (data?.erro) return null;
-    return {
-      street: data.logradouro || "",
-      neighborhood: data.bairro || "",
-      city: data.localidade || "",
-      uf: data.uf || "",
-    };
-  } catch {
-    return null;
-  }
-}
-
-// Cidades IBGE
-async function fetchCities(uf: string) {
-  try {
-    const res = await fetch(
-      `https://servicodados.ibge.gov.br/api/v1/localidades/estados/${uf}/municipios`
-    );
-    if (!res.ok) return [];
-    const data = await res.json();
-    // CORREÇÃO: Linha 73 - Especificar o tipo do objeto da cidade
-    return data.map((c: { nome: string }) => c.nome) as string[]; 
-  } catch {
-    return [];
-  }
-}
+// ==========================================================
 
 function ProfilePageInner() {
   const router = useRouter();
-  const search = useSearchParams();
-  const nextRaw = search?.get("next") || "/";
 
-  const next = useMemo(() => {
-    try {
-      const decoded = decodeURIComponent(nextRaw);
-      if (/^https?:\/\//i.test(decoded)) return "/";
-      return decoded || "/";
-    } catch {
-      return "/";
-    }
-  }, [nextRaw]);
+  // Dados do perfil (estado local)
+  const [profileId, setProfileId] = useState<string | null>(null);
+  const [email, setEmail] = useState<string | null>(null); // Apenas para exibição
 
-  const [userId, setUserId] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [whatsapp, setWhatsapp] = useState("");
+  const [cep, setCep] = useState("");
+  const [street, setStreet] = useState("");
+  const [number, setNumber] = useState("");
+  const [complement, setComplement] = useState("");
+  const [bairro, setBairro] = useState("");
+  const [city, setCity] = useState("");
+  const [state, setState] = useState("");
+  const [cpf, setCpf] = useState("");
+
+  // Estados de UI
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
 
-  // Form state
-  const [name, setName] = useState("");
-  const [whatsapp, setWhatsapp] = useState("");
-  const [street, setStreet] = useState("");
-  const [number, setNumber] = useState("");
-  const [complement, setComplement] = useState("");
-  const [neighborhood, setNeighborhood] = useState("");
-  const [stateUf, setStateUf] = useState("SP");
-  const [city, setCity] = useState("");
-  const [cities, setCities] = useState<string[]>([]);
-  const [cep, setCep] = useState("");
-  const [cpf, setCpf] = useState("");
+  // Checa se pode salvar (simplificado)
+  const canSave = !saving && name.length > 0 && cpfValid(cpf);
 
-  const canSave = useMemo(() => {
-    return (
-      name.trim().length > 1 &&
-      onlyDigits(whatsapp).length >= 10 &&
-      street.trim().length > 1 &&
-      number.trim().length > 0 &&
-      neighborhood.trim().length > 1 &&
-      (stateUf || "").trim().length >= 2 &&
-      city.trim().length > 1 &&
-      cepValid(cep) &&
-      cpfValid(cpf)
-    );
-  }, [name, whatsapp, street, number, neighborhood, stateUf, city, cep, cpf]);
-
-  // Carrega usuário + perfil
+  // Carregar perfil
   useEffect(() => {
     (async () => {
-      try {
-        setLoading(true);
-        const { data, error } = await supabase.auth.getUser();
-        if (error) throw error;
-        if (!data?.user) {
-          router.replace("/auth");
-          return;
-        }
-        const uid = data.user.id;
-        setUserId(uid);
+      const { data: userSession } = await supabase.auth.getSession();
+      const user = userSession.session?.user;
 
-        const { data: p, error: pErr } = await supabase
-          .from("user_profiles")
-          .select(
-            "id,name,whatsapp,street,number,complement,bairro,city,state,cep,cpf,status"
-          )
-          .eq("id", uid)
-          .maybeSingle();
-
-        if (pErr) throw pErr;
-
-        if (p) {
-          setName(p.name ?? "");
-          setWhatsapp(p.whatsapp ?? "");
-          setStreet(p.street ?? "");
-          setNumber(p.number ?? "");
-          setComplement(p.complement ?? "");
-          setNeighborhood(p.bairro ?? "");
-          setCity(p.city ?? "");
-          setStateUf((p.state as string) ?? "SP");
-          setCep(p.cep ?? "");
-          setCpf(p.cpf ?? "");
-        }
-      } catch (e: unknown) { 
-        setErr((e instanceof Error ? e.message : undefined) ?? "Não foi possível carregar seu perfil");
-      } finally {
-        setLoading(false);
+      if (!user) {
+        // Redireciona para o login se não houver usuário
+        router.replace("/auth?next=/profile");
+        return;
       }
+
+      setProfileId(user.id);
+      setEmail(user.email);
+
+      const { data: profileRow } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", user.id)
+        .single();
+
+      if (profileRow) {
+        setName(profileRow.name || "");
+        setWhatsapp(profileRow.whatsapp || "");
+        setCep(profileRow.cep || "");
+        setStreet(profileRow.street || "");
+        setNumber(profileRow.number || "");
+        setComplement(profileRow.complement || "");
+        setBairro(profileRow.bairro || "");
+        setCity(profileRow.city || "");
+        setState(profileRow.state || "");
+        setCpf(profileRow.cpf || "");
+      }
+
+      setLoading(false);
     })();
   }, [router]);
 
-  // CEP → auto preencher logradouro/bairro/cidade/UF (sempre sobrescreve ao achar)
-  useEffect(() => {
-    const s = onlyDigits(cep);
-    if (s.length !== 8) return;
-
-    let cancelled = false;
-    (async () => {
-      const addr = await fetchAddress(s);
-      if (!addr || cancelled) return;
-
-      setStreet(addr.street || "");
-      setNeighborhood(addr.neighborhood || "");
-      setCity(addr.city || "");
-      setStateUf(addr.uf || "SP");
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [cep]);
-
-  // Estado → lista de cidades
-  useEffect(() => {
-    if (!stateUf) return;
-    fetchCities(stateUf).then(setCities);
-  }, [stateUf]);
-
-  async function onSubmit(e: React.FormEvent) {
+  // Salvar perfil
+  const saveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userId) return;
+    if (!profileId || !canSave) return;
 
-    try {
-      setSaving(true);
-      setErr(null);
-      setOk(null);
+    setSaving(true);
+    setErr(null);
+    setOk(null);
 
-      const payload = {
-        id: userId,
-        name: name.trim(),
-        whatsapp: onlyDigits(whatsapp),
-        street: street.trim(),
-        number: number.trim(),
-        complement: complement.trim(),
-        bairro: neighborhood.trim(),
-        city: city.trim(),
-        state: stateUf.trim(),
-        cep: onlyDigits(cep),
-        cpf: onlyDigits(cpf),
-      };
+    const dataToSave: Omit<Profile, "id"> = {
+      name,
+      whatsapp: whatsapp ? onlyDigits(whatsapp).substring(1) : null, // Remove o '+' e formata
+      cep: onlyDigits(cep) || null,
+      street: street || null,
+      number: number || null,
+      complement: complement || null,
+      bairro: bairro || null,
+      city: city || null,
+      state: state || null,
+      cpf: onlyDigits(cpf) || null,
+      // Não alteramos o status aqui
+    };
 
-      const { error: upErr } = await supabase
-        .from("user_profiles")
-        .upsert(payload, { onConflict: "id" });
-      if (upErr) throw upErr;
+    // CORRIGIDO: Remoção de `as any`
+    const { error } = await supabase
+      .from("profiles")
+      .upsert({ id: profileId, ...dataToSave });
 
-      // Dispara geocoding assíncrono e silencioso
-      try {
-        await fetch("/functions/v1/geocode-address", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            target: "profiles",
-            id: userId,
-            address: {
-              address_line1: `${payload.street}, ${payload.number}`.trim(),
-              address_line2: payload.complement || undefined,
-              district: payload.bairro || undefined,
-              city: payload.city,
-              state: payload.state,
-              postal_code: payload.cep,
-              country: "BR",
-            },
-          }),
-        });
-      } catch {
-        // Se a Edge Function ainda não existir, segue sem travar o fluxo
-      }
+    setSaving(false);
 
-      setOk("Perfil salvo com sucesso.");
-      setTimeout(() => router.replace(next), 350);
-    } catch (e: unknown) { 
-      setErr((e instanceof Error ? e.message : undefined) ?? "Não foi possível salvar seu perfil");
-    } finally {
-      setSaving(false);
+    if (error) {
+      setErr("Erro ao salvar perfil: " + error.message);
+      return;
     }
-  }
 
-  if (loading) {
-    return <main className="min-h-screen bg-neutral-50" />;
-  }
+    setOk("Perfil atualizado com sucesso!");
+    setTimeout(() => setOk(null), 3000);
+  };
+
+  // Preenchimento de CEP
+  const lookupCep = async (v: string) => {
+    const digits = onlyDigits(v);
+    setCep(digits);
+    if (digits.length === 8) {
+      try {
+        const res = await fetch(`https://viacep.com.br/ws/${digits}/json/`);
+        const data = await res.json();
+        if (data.erro) {
+          throw new Error("CEP inválido");
+        }
+        setStreet(data.logradouro || "");
+        setBairro(data.bairro || "");
+        setCity(data.localidade || "");
+        setState(data.uf || "");
+        // focamos no número
+        document.getElementById("number")?.focus();
+      } catch (e) {
+        setErr("CEP não encontrado ou inválido.");
+      }
+    }
+  };
+
+  if (loading)
+    return (
+      <main className="min-h-screen bg-neutral-50 p-5 pt-10">
+        <h1 className="text-3xl font-semibold tracking-tight text-black">
+          Seu Perfil
+        </h1>
+        <p className="mt-1 text-sm text-neutral-500">Carregando...</p>
+      </main>
+    );
 
   return (
-    <main className="bg-neutral-50 min-h-screen text-neutral-900">
-      <div className="max-w-md mx-auto px-5 py-6">
-        <h1 className="text-[28px] leading-7 font-bold tracking-tight">
-          Meu perfil
+    <main className="min-h-screen bg-neutral-50 p-5 pt-10">
+      <div className="max-w-sm mx-auto">
+        <h1 className="text-3xl font-semibold tracking-tight text-black">
+          Seu Perfil
         </h1>
+        <p className="mt-1 text-sm text-neutral-500">
+          Dados de contato e endereço para entrega.
+        </p>
 
-        <div className="mt-5">
-          <form onSubmit={onSubmit} className="space-y-4">
-            {/* Nome */}
+        <div className="mt-8">
+          <form onSubmit={saveProfile} className="space-y-4">
+            {/* Email (read-only) */}
             <div>
-              <label className="mb-1 block text-sm font-medium text-neutral-800">
-                Nome
+              <label className="text-xs font-medium text-neutral-600">
+                Email
               </label>
               <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] outline-none focus:ring-2 focus:ring-black/10"
-                placeholder="Seu nome"
+                type="email"
+                readOnly
+                value={email || ""}
+                className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm bg-neutral-100 text-neutral-600"
               />
             </div>
 
-            {/* WhatsApp */}
+            {/* Nome */}
             <div>
-              <label className="mb-1 block text-sm font-medium text-neutral-800">
-                WhatsApp
+              <label
+                htmlFor="name"
+                className="text-xs font-medium text-neutral-600"
+              >
+                Nome Completo
               </label>
-              <div className="[&_.flag-dropdown]:!h-[48px] [&_.selected-flag]:!h-[48px] [&_.country-list]:!text-sm">
-                <PhoneInput
-                  country="br"
-                  value={whatsapp}
-                  onChange={(val) => setWhatsapp(val)}
-                  inputProps={{ name: "whatsapp", required: true }}
-                  enableSearch
-                  inputStyle={{
-                    width: "100%",
-                    height: "48px",
-                    borderRadius: 12,
-                    borderColor: "#e5e7eb",
-                    background: "#fff",
-                    color: "#0a0a0a",
-                  }}
-                  buttonStyle={{
-                    borderTopLeftRadius: 12,
-                    borderBottomLeftRadius: 12,
-                    borderColor: "#e5e7eb",
-                  }}
-                />
-              </div>
+              <input
+                type="text"
+                id="name"
+                required
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                disabled={saving}
+                className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
+              />
+            </div>
+
+            {/* Whatsapp */}
+            <div>
+              <label
+                htmlFor="whatsapp"
+                className="text-xs font-medium text-neutral-600"
+              >
+                Whatsapp
+              </label>
+              <PhoneInput
+                country={"br"}
+                value={whatsapp}
+                onChange={(phone) => setWhatsapp(phone)}
+                disabled={saving}
+                inputProps={{
+                  name: "whatsapp",
+                  required: true,
+                  className: "react-phone-input-2",
+                }}
+                inputStyle={{
+                  width: "100%",
+                  borderRadius: "0.75rem",
+                  borderColor: "rgb(229 231 235)",
+                  paddingTop: "12px",
+                  paddingBottom: "12px",
+                  paddingLeft: "52px",
+                  boxShadow: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
+                }}
+                buttonStyle={{
+                  borderRadius: "0.75rem 0 0 0.75rem",
+                  borderColor: "rgb(229 231 235)",
+                  backgroundColor: "white",
+                }}
+              />
             </div>
 
             {/* CEP */}
             <div>
-              <label className="mb-1 block text-sm font-medium text-neutral-800">
+              <label
+                htmlFor="cep"
+                className="text-xs font-medium text-neutral-600"
+              >
                 CEP
               </label>
               <input
+                type="text"
+                id="cep"
+                maxLength={9}
                 value={cep}
-                onChange={(e) => setCep(e.target.value)}
-                inputMode="numeric"
-                placeholder="01311000"
-                className={`w-full rounded-xl border px-3 py-3 text-[15px] outline-none focus:ring-2 ${
-                  cep.length > 0 && !cepValid(cep)
-                    ? "border-red-300 focus:ring-red-200 bg-red-50"
-                    : "border-neutral-200 focus:ring-black/10 bg-white"
-                }`}
+                onChange={(e) => lookupCep(e.target.value)}
+                disabled={saving}
+                className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
               />
               {cep.length > 0 && !cepValid(cep) && (
-                <p className="mt-1 text-xs text-red-600">
-                  CEP deve ter 8 dígitos.
-                </p>
+                <p className="mt-1 text-xs text-red-600">CEP deve ter 8 dígitos.</p>
               )}
             </div>
 
-            {/* Rua / Número */}
-            <div className="grid grid-cols-3 gap-3">
-              <div className="col-span-2">
-                <label className="mb-1 block text-sm font-medium text-neutral-800">
-                  Street
+            {/* Rua */}
+            <div>
+              <label
+                htmlFor="street"
+                className="text-xs font-medium text-neutral-600"
+              >
+                Rua/Avenida
+              </label>
+              <input
+                type="text"
+                id="street"
+                value={street}
+                onChange={(e) => setStreet(e.target.value)}
+                disabled={saving}
+                className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
+              />
+            </div>
+
+            <div className="flex gap-4">
+              {/* Número */}
+              <div className="w-1/3">
+                <label
+                  htmlFor="number"
+                  className="text-xs font-medium text-neutral-600"
+                >
+                  Número
                 </label>
                 <input
-                  value={street}
-                  onChange={(e) => setStreet(e.target.value)}
-                  className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] outline-none focus:ring-2 focus:ring-black/10"
-                  placeholder="Rua Haddock Lobo"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-neutral-800">
-                  Number
-                </label>
-                <input
+                  type="text"
+                  id="number"
                   value={number}
                   onChange={(e) => setNumber(e.target.value)}
-                  className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] outline-none focus:ring-2 focus:ring-black/10"
-                  placeholder="123"
+                  disabled={saving}
+                  className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
+                />
+              </div>
+
+              {/* Complemento */}
+              <div className="flex-1">
+                <label
+                  htmlFor="complement"
+                  className="text-xs font-medium text-neutral-600"
+                >
+                  Complemento (ex: apto 101)
+                </label>
+                <input
+                  type="text"
+                  id="complement"
+                  value={complement}
+                  onChange={(e) => setComplement(e.target.value)}
+                  disabled={saving}
+                  className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
                 />
               </div>
             </div>
 
-            {/* Complemento */}
-            <div>
-              <label className="mb-1 block text-sm font-medium text-neutral-800">
-                Complemento
-              </label>
-              <input
-                value={complement}
-                onChange={(e) => setComplement(e.target.value)}
-                className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] outline-none focus:ring-2 focus:ring-black/10"
-                placeholder="Apto 12"
-              />
-            </div>
-
-            {/* Bairro */}
-            <div>
-              <label className="mb-1 block text-sm font-medium text-neutral-800">
-                Neighborhood (Bairro)
-              </label>
-              <input
-                value={neighborhood}
-                onChange={(e) => setNeighborhood(e.target.value)}
-                className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] outline-none focus:ring-2 focus:ring-black/10"
-                placeholder="Bela Vista"
-              />
-            </div>
-
-            {/* Estado + Cidade */}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="relative">
-                <label className="mb-1 block text-sm font-medium text-neutral-800">
-                  Estado (UF)
-                </label>
-                <select
-                  value={stateUf}
-                  onChange={(e) => setStateUf(e.target.value)}
-                  className="w-full rounded-xl border border-neutral-200 bg-white appearance-none px-3 py-3 text-[15px] outline-none focus:ring-2 focus:ring-black/10 pr-8"
+            <div className="flex gap-4">
+              {/* Bairro */}
+              <div className="flex-1">
+                <label
+                  htmlFor="bairro"
+                  className="text-xs font-medium text-neutral-600"
                 >
-                  <option value="">Selecione</option>
-                  {[
-                    "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO",
-                  ].map((uf) => (
-                    <option key={uf} value={uf}>
-                      {uf}
-                    </option>
-                  ))}
-                </select>
-                <span className="pointer-events-none absolute right-3 top-9 text-neutral-400">
-                  ▼
-                </span>
+                  Bairro
+                </label>
+                <input
+                  type="text"
+                  id="bairro"
+                  value={bairro}
+                  onChange={(e) => setBairro(e.target.value)}
+                  disabled={saving}
+                  className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
+                />
               </div>
-              <div className="relative">
-                <label className="mb-1 block text-sm font-medium text-neutral-800">
+
+              {/* Cidade */}
+              <div className="flex-1">
+                <label
+                  htmlFor="city"
+                  className="text-xs font-medium text-neutral-600"
+                >
                   Cidade
                 </label>
-                <select
+                <input
+                  type="text"
+                  id="city"
                   value={city}
                   onChange={(e) => setCity(e.target.value)}
-                  className="w-full rounded-xl border border-neutral-200 bg-white appearance-none px-3 py-3 text-[15px] outline-none focus:ring-2 focus:ring-black/10 pr-8"
-                >
-                  <option value="">Selecione</option>
-                  {cities.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-                <span className="pointer-events-none absolute right-3 top-9 text-neutral-400">
-                  ▼
-                </span>
+                  disabled={saving}
+                  className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
+                />
               </div>
+            </div>
+
+            {/* Estado */}
+            <div>
+              <label
+                htmlFor="state"
+                className="text-xs font-medium text-neutral-600"
+              >
+                Estado (UF)
+              </label>
+              <input
+                type="text"
+                id="state"
+                value={state}
+                onChange={(e) => setState(e.target.value)}
+                disabled={saving}
+                maxLength={2}
+                className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black uppercase"
+              />
             </div>
 
             {/* CPF */}
             <div>
-              <label className="mb-1 block text-sm font-medium text-neutral-800">
-                CPF
+              <label
+                htmlFor="cpf"
+                className="text-xs font-medium text-neutral-600"
+              >
+                CPF (apenas números)
               </label>
               <input
+                type="text"
+                id="cpf"
+                maxLength={11}
                 value={cpf}
-                onChange={(e) => setCpf(e.target.value)}
-                inputMode="numeric"
-                placeholder="000.000.000-00"
-                className={`w-full rounded-xl border px-3 py-3 text-[15px] outline-none focus:ring-2 ${
+                onChange={(e) => setCpf(onlyDigits(e.target.value))}
+                disabled={saving}
+                className={`mt-1 w-full rounded-xl border px-4 py-3 text-sm shadow-sm focus:ring-black ${
                   cpf.length > 0 && !cpfValid(cpf)
-                    ? "border-red-300 focus:ring-red-200 bg-red-50"
-                    : "border-neutral-200 focus:ring-black/10 bg-white"
+                    ? "border-red-500 focus:border-red-500"
+                    : "border-neutral-200 focus:border-black bg-white"
                 }`}
               />
               {cpf.length > 0 && !cpfValid(cpf) && (
@@ -471,7 +444,7 @@ function ProfilePageInner() {
               disabled={!canSave || saving}
               className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm transition active:scale-[0.99] disabled:opacity-60"
             >
-              {saving ? "Saving…" : "Save profile"}
+              {saving ? "Salvando…" : "Salvar perfil"}
             </button>
           </form>
         </div>
@@ -484,7 +457,7 @@ function ProfilePageInner() {
             }}
             className="text-xs text-neutral-600 underline"
           >
-            Sign out
+            Sair (Sign out)
           </button>
         </div>
       </div>
@@ -494,7 +467,16 @@ function ProfilePageInner() {
 
 export default function ProfilePage() {
   return (
-    <Suspense fallback={<main className="min-h-screen bg-neutral-50" />}>
+    <Suspense
+      fallback={
+        <main className="min-h-screen bg-neutral-50 p-5 pt-10">
+          <h1 className="text-3xl font-semibold tracking-tight text-black">
+            Seu Perfil
+          </h1>
+          <p className="mt-1 text-sm text-neutral-500">Carregando...</p>
+        </main>
+      }
+    >
       <ProfilePageInner />
     </Suspense>
   );

@@ -20,7 +20,8 @@ function OtpPageInner() {
     try {
       const decoded = decodeURIComponent(nextRaw);
       // Evita redirecionamento para URLs externas
-      if (/^https?:\\/\\//i.test(decoded)) return "/";
+      // CORRIGIDO: Removido escape duplo (\\/\\/ -> ://)
+      if (/^https?:\/\//i.test(decoded)) return "/"; 
       return decoded || "/";
     } catch {
       return "/";

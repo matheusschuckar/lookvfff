@@ -2,13 +2,21 @@
 
 import Image from "next/image";
 import Link from "next/link";
+// Importa o tipo base Product
 import type { Product } from "@/lib/data/types";
 
+// CORREÇÃO: Define um novo tipo que inclui as propriedades opcionais do dedupe.
+type DeduplicatedProduct = Product & {
+  store_count?: number;
+  stores?: string[];
+};
+
 export default function ProductCard({
+  // CORREÇÃO: Usa o novo tipo DeduplicatedProduct para o prop 'p'
   p,
   onTap,
 }: {
-  p: Product;
+  p: DeduplicatedProduct;
   onTap?: (p: Product) => void;
 }) {
   const photo = Array.isArray(p.photo_url)
@@ -23,10 +31,14 @@ export default function ProductCard({
       : String(p.price_tag ?? "");
 
   // extras vindos do dedupe (opcionais)
-  const storeCount = Number((p as any).store_count ?? 1);
-  const storesList = Array.isArray((p as any).stores)
-    ? ((p as any).stores as string[])
+  // CORREÇÃO: Removido 'as any' — Linha 26:35
+  const storeCount = Number(p.store_count ?? 1); 
+  
+  // CORREÇÃO: Removido 'as any' — Linhas 27:42 e 28:14
+  const storesList = Array.isArray(p.stores)
+    ? p.stores
     : [];
+    
   const extraStoresLabel = storeCount > 1 ? ` · +${storeCount - 1} lojas` : "";
 
   const handleClick = () => {
@@ -66,14 +78,14 @@ export default function ProductCard({
               ? `${p.store_name} · também em: ${storesList
                   .filter((s) => s !== p.store_name)
                   .join(", ")}`
-              : p.store_name
+              : ""
           }
         >
           {p.store_name}
-          {extraStoresLabel}
+          <span className="text-gray-400">{extraStoresLabel}</span>
         </div>
-
-        <div className="mt-1 text-[13px] font-semibold text-gray-900">
+        
+        <div className="mt-1 text-[13px] font-semibold text-[#141414]">
           {price}
         </div>
       </div>

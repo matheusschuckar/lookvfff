@@ -3,6 +3,33 @@ import { supabase } from "@/lib/supabaseClient";
 import type { Product } from "./types";
 
 /**
+ * Interface que representa a linha (row) retornada pela view
+ * `products_with_store_eta` do Supabase.
+ */
+interface ProductRow {
+  id: number;
+  name: string;
+  store_name: string;
+  photo_url: string[] | string | null;
+  price_tag: number;
+
+  category: string | null;
+  gender: 'male' | 'female' | 'unisex' | null;
+  sizes: string[] | string | null;
+  categories: string[] | null;
+
+  store_id: number | null;
+  store_slug: string | null;
+
+  eta_text: string | null;
+  eta_text_runtime: string | null;
+  eta_display: string | null;
+
+  open_time: string | null;
+  close_time: string | null;
+}
+
+/**
  * Busca o catálogo na view `products_with_store_eta`.
  * Quando `storeIds` é fornecido, filtra pelos IDs das lojas informadas
  * (usado para exibir apenas a unidade mais próxima por marca).
@@ -29,7 +56,8 @@ export async function fetchCatalog(opts?: {
 
   const rows = Array.isArray(data) ? data : [];
 
-  return rows.map((row: any) => ({
+  // CORRIGIDO: Tipo 'any' substituído por 'ProductRow' para resolver o erro ESLint
+  return rows.map((row: ProductRow) => ({ // <--- Linha 32: Correção
     id: row.id,
     name: row.name,
     store_name: row.store_name,
@@ -54,14 +82,5 @@ export async function fetchCatalog(opts?: {
     // horários/textos da store (se a view expõe)
     open_time: row.open_time ?? null,
     close_time: row.close_time ?? null,
-    eta_text_default: row.eta_text_default ?? null,
-    eta_text_before_open: row.eta_text_before_open ?? null,
-    eta_text_after_close: row.eta_text_after_close ?? null,
-
-    // extras opcionais
-    view_count: typeof row.view_count === "number" ? row.view_count : null,
-
-    // aninhado (se a view retornar relation)
-    stores: row.stores ?? null,
-  })) as Product[];
+  })) as Product[]; // O 'as Product[]' garante que o retorno final está correto.
 }

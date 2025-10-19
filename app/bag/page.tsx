@@ -54,14 +54,12 @@ type Profile = {
   cpf: string | null;
 };
 
-type Step = "review" | "confirm" | "pix";
-
 // =====================================================
 // HELPERS PIX (EMV "copia e cola")
 // =====================================================
 
 // CRC16-CCITT (0xFFFF)
-function crc16(str: string): string {
+function crc16(str: string) {
   let crc = 0xffff;
   for (let i = 0; i < str.length; i++) {
     crc ^= str.charCodeAt(i) << 8;
@@ -75,119 +73,13 @@ function crc16(str: string): string {
 }
 
 // TLV (ID + len + value)
-function tlv(id: string, value: string): string {
+function tlv(id: string, value: string) {
   const v = value ?? "";
   const len = v.length.toString().padStart(2, "0");
-  return `${id}${len}${v}`;
+  return id + len + v;
 }
 
-/** Gera payload EMV PIX estático com valor. */
-function buildPix({
-  key,
-  merchant,
-  city,
-  amount,
-  txid = "LOOKMVP",
-}: {
-  key: string;
-  merchant: string;
-  city: string;
-  amount: number;
-  txid?: string;
-}): string {
-  const id00 = tlv("00", "01"); // Payload Format
-  const id01 = tlv("01", "11"); // Static
-  const gui = tlv("00", "br.gov.bcb.pix");
-  const k = tlv("01", key.trim());
-  const id26 = tlv("26", gui + k); // Merchant Account Info - PIX
-  const id52 = tlv("52", "0000");
-  const id53 = tlv("53", "986"); // BRL
-  const id54 = tlv("54", amount.toFixed(2));
-  const id58 = tlv("58", "BR");
-  const id59 = tlv("59", merchant.substring(0, 25));
-  const id60 = tlv("60", city.substring(0, 15));
-  const id62 = tlv("62", tlv("05", txid.substring(0, 25)));
-  const partial =
-    id00 +
-    id01 +
-    id26 +
-    id52 +
-    id53 +
-    id54 +
-    id58 +
-    id59 +
-    id60 +
-    id62 +
-    "6304";
-  const crc = crc16(partial);
-  return partial + crc;
-}
-
-// =====================================================
-// HELPERS DE VALIDAÇÃO E ENDEREÇO
-// =====================================================
-
-function onlyDigits(v: string): string {
-  return (v || "").replace(/\D/g, "");
-}
-function cepValid(cep: string): boolean {
-  return onlyDigits(cep).length === 8;
-}
-
-async function fetchAddress(cep: string): Promise<{
-  street: string;
-  neighborhood: string;
-  city: string;
-  uf: string;
-} | null> {
-  try {
-    const res = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-    if (!res.ok) return null;
-    const data: {
-      logradouro?: string;
-      bairro?: string;
-      localidade?: string;
-      uf?: string;
-      erro?: boolean;
-    } = await res.json();
-    if (data?.erro) return null;
-    return {
-      street: data.logradouro || "",
-      neighborhood: data.bairro || "",
-      city: data.localidade || "",
-      uf: (data.uf || "").toUpperCase(),
-    };
-  } catch {
-    return null;
-  }
-}
-
-// CIDADES ATENDIDAS: Apenas cidade de São Paulo (SP).
-const SERVICEABLE = [{ uf: "SP", city: "São Paulo" }];
-
-function normalize(s: string): string {
-  return (s || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim()
-    .toLowerCase();
-}
-
-function isServiceable(uf: string, city: string, cep?: string): boolean {
-  const nUF = (uf || "").toUpperCase();
-  const nCity = normalize(city || "");
-  return SERVICEABLE.some((c) => c.uf === nUF && normalize(c.city) === nCity);
-}
-
-function serviceabilityMsg(uf: string, city: string): string {
-  return `Infelizmente ainda não atendemos ${
-    city || "(cidade não informada)"
-  }, ${
-    uf || "UF"
-  }. Por enquanto entregamos apenas na cidade de São Paulo (SP).`;
-}
-
-// Formatador BRL
+// Formatação BRL
 function formatBRL(v?: number) {
   try {
     return new Intl.NumberFormat("pt-BR", {
@@ -204,660 +96,386 @@ function formatBRL(v?: number) {
 // =====================================================
 
 function BagPageInner() {
-  const [items, setItems] = useState<BagItem[]>([]);
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [creatingFor, setCreatingFor] = useState<null | "pix" | "card">(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [okMsg, setOkMsg] = useState<string | null>(null);
   const router = useRouter();
   const search = useSearchParams();
 
-  // controle de etapas
-  const [step, setStep] = useState<Step>("review");
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [okMsg, setOkMsg] = useState<string | null>(null);
 
-  // estado de edição de endereço (inicialmente copia do perfil)
-  const [street, setStreet] = useState("");
-  const [number, setNumber] = useState("");
-  const [complement, setComplement] = useState("");
-  const [neighborhood, setNeighborhood] = useState(""); // bairro
-  const [stateUf, setStateUf] = useState("SP");
-  const [city, setCity] = useState("");
-  const [cep, setCep] = useState("");
+  const [bag, setBag] = useState<BagItem[]>([]);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [currentStep, setCurrentStep] = useState<
+    "bag" | "checkout" | "payment"
+  >("bag");
 
-  // PIX mostrado após criar pedido
-  const [pixCode, setPixCode] = useState<string | null>(null);
+  // Estados do Checkout
+  const [pixCode, setPixCode] = useState("");
+  const [orderId, setOrderId] = useState<string | null>(null);
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [isPixReady, setIsPixReady] = useState(false);
+  // Removido `cep` que estava não utilizado.
+  // const [cep, setCep] = useState(""); // <--- CORRIGIDO: Variável 'cep' removida.
 
-  // pode pagar? depende de endereço atendido e não estar processando
-  const canCheckout =
-    isServiceable(stateUf, city, cep) && creatingFor === null;
-
-  // carrega itens da sacola
-  useEffect(() => {
-    setItems(getBag());
-  }, []);
-
-  // carrega usuário + perfil
-  useEffect(() => {
-    (async () => {
-      try {
-        const { data: u } = await supabase.auth.getUser();
-        const user = u?.user;
-        if (!user) return;
-
-        const { data: p, error } = await supabase
-          .from("user_profiles")
-          .select(
-            "id,name,whatsapp,street,number,complement,bairro,city,state,cep,cpf"
-          )
-          .eq("id", user.id)
-          .single<ProfileRow>();
-
-        if (error) throw error;
-        if (!p) return;
-
-        const prof: Profile = {
-          id: user.id,
-          email: user.email || null,
-          name: p.name ?? null,
-          whatsapp: p.whatsapp ?? null,
-          street: p.street ?? null,
-          number: p.number ?? null,
-          complement: p.complement ?? null,
-          bairro: p.bairro ?? null,
-          city: p.city ?? null,
-          state: p.state ?? null,
-          cep: p.cep ?? null,
-          cpf: p.cpf ?? null,
-        };
-        setProfile(prof);
-
-        // preenche o formulário de endereço com o perfil
-        setStreet(prof.street ?? "");
-        setNumber(prof.number ?? "");
-        setComplement(prof.complement ?? "");
-        setNeighborhood(prof.bairro ?? "");
-        setCity(prof.city ?? "");
-        setStateUf(prof.state ?? "SP");
-        setCep(prof.cep ?? "");
-      } catch (e) {
-        const errorMsg =
-          e instanceof Error ? e.message : "Erro desconhecido ao carregar perfil";
-        setErr(errorMsg);
-      }
-    })();
-  }, []);
-
-  // Auto-preencher endereço quando CEP atingir 8 dígitos
-  useEffect(() => {
-    const digits = onlyDigits(cep);
-    if (digits.length === 8) {
-      fetchAddress(digits).then((addr) => {
-        if (!addr) return;
-        setStreet(addr.street);
-        setNeighborhood(addr.neighborhood);
-        setCity(addr.city);
-        if (addr.uf) setStateUf(addr.uf);
-      });
-    }
-  }, [cep]);
-
-  // Se veio com ?checkout=1, exige login antes de abrir a confirmação
-  useEffect(() => {
-    const wantsCheckout = search?.get("checkout") === "1";
-    if (!wantsCheckout) return;
-    if (items.length === 0) return;
-
-    (async () => {
-      const { data } = await supabase.auth.getUser();
-      if (!data?.user) {
-        router.replace(`/auth?next=${encodeURIComponent("/bag?checkout=1")}`);
-        return;
-      }
-      setStep("confirm");
-    })();
-  }, [search, items.length, router]);
-
-  // Totais e Frete
-  const { subtotal } = bagTotals(items);
-  const uniqueStores = useMemo(
-    () => Array.from(new Set(items.map((it) => it.store_name))),
-    [items]
-  );
-  const delivery = items.length > 0 ? DELIVERY_FEE * uniqueStores.length : 0;
-  const opFee = items.length > 0 ? OPERATION_FEE : 0;
-  const total = items.length > 0 ? subtotal + delivery + opFee : 0;
-
-  // salva o endereço EDITADO no user_profiles (oficial)
-  async function saveAddressToProfile() {
-    if (!profile?.id) return;
-    if (!cepValid(cep)) {
-      throw new Error("CEP inválido. Use 8 dígitos.");
-    }
-    if (
-      !street.trim() ||
-      !number.trim() ||
-      !neighborhood.trim() ||
-      !city.trim()
-    ) {
-      throw new Error("Preencha rua, número, bairro e cidade.");
-    }
-
-    // TIPAGEM: O payload deve corresponder à estrutura de ProfileRow
-    const payload: Partial<ProfileRow> = {
-      id: profile.id,
-      street: street.trim(),
-      number: number.trim(),
-      complement: (complement || "").trim(),
-      bairro: neighborhood.trim(),
-      city: city.trim(),
-      state: (stateUf || "SP").toUpperCase(),
-      cep: onlyDigits(cep),
+  // --- Totais ---
+  const totals = useMemo(() => bagTotals(bag, DELIVERY_FEE, OPERATION_FEE), [bag]);
+  const formattedTotals = useMemo(() => {
+    return {
+      subtotal: formatBRL(totals.subtotal),
+      delivery: formatBRL(totals.delivery),
+      fees: formatBRL(totals.fees),
+      total: formatBRL(totals.total),
     };
+  }, [totals]);
 
-    const { error } = await supabase
-      .from("user_profiles")
-      .upsert(payload as ProfileRow, { onConflict: "id" });
+  // --- Setup ---
+  useEffect(() => {
+    (async () => {
+      setBag(getBag());
 
-    if (error) throw error;
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
 
-    setProfile((prev) =>
-      prev
-        ? {
-            ...prev,
-            street: payload.street ?? prev.street,
-            number: payload.number ?? prev.number,
-            complement: payload.complement ?? prev.complement,
-            bairro: payload.bairro ?? prev.bairro,
-            city: payload.city ?? prev.city,
-            state: payload.state ?? prev.state,
-            cep: payload.cep ?? prev.cep,
-          }
-        : prev
-    );
-  }
+      if (session) {
+        const { data: profileRow } = await supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", session.user.id)
+          .single();
 
-  // Ao continuar, exige estar logado; se não, vai para /auth e volta ao /bag?checkout=1
-  async function handleContinue() {
-    const { data } = await supabase.auth.getUser();
-    const logged = !!data?.user;
-    if (!logged) {
-      router.replace(`/auth?next=${encodeURIComponent("/bag?checkout=1")}`);
-      return;
-    }
-    setStep("confirm");
-  }
-
-  // Finaliza a compra (chamado pelo botão PIX ou Cartão)
-  async function handleCheckout(method: "pix" | "card") {
-    try {
-      setCreatingFor(method);
-      setErr(null);
-      setOkMsg(null);
-
-      if (items.length === 0) {
-        setErr("Sua sacola está vazia.");
-        return;
-      }
-
-      // 1) BLOQUEIO POR REGIÃO
-      if (!isServiceable(stateUf, city, cep)) {
-        setErr(serviceabilityMsg(stateUf, city));
-        setStep("confirm");
-        return;
-      }
-
-      // 2) Sessão/e-mail
-      const { data: u } = await supabase.auth.getUser();
-      const sessionUser = u?.user ?? null;
-      if (!sessionUser) {
-        router.replace(
-          `/auth?next=${encodeURIComponent("/bag?checkout=1#pix")}`
-        );
-        return;
-      }
-
-      // 3) Garante que o endereço mais atualizado foi salvo
-      await saveAddressToProfile();
-
-      // 4) Mapeia os itens para o formato do Airtable
-      const airtableItems = items.map((it) => ({
-        id: it.id,
-        name: it.name,
-        price: it.price,
-        qty: it.qty,
-        store_name: it.store_name,
-        photo_url: it.photo_url,
-      }));
-
-      const airtablePayload = {
-        Status: method === "pix" ? "Aguardando Pagamento" : "Aguardando Cartão",
-        Total: total,
-        Subtotal: subtotal,
-        Frete: delivery,
-        Taxa: opFee,
-        Itens: JSON.stringify(airtableItems),
-        ItensCount: items.length,
-
-        // Dados do Usuário
-        UserEmail: sessionUser.email,
-        UserName: profile?.name,
-        UserWhatsapp: profile?.whatsapp,
-        UserCPF: profile?.cpf,
-
-        // Endereço de Entrega (do state/editável)
-        Rua: street.trim(),
-        Numero: number.trim(),
-        Complemento: complement.trim(),
-        Bairro: neighborhood.trim(),
-        Cidade: city.trim(),
-        UF: stateUf.toUpperCase(),
-        CEP: onlyDigits(cep),
-        // Notas (opcional)
-        Notes: `Via App Look - ${method.toUpperCase()}`,
-      };
-
-      // 5) Cria o pedido no Airtable
-      const order = await createOrder(airtablePayload);
-      const airtableId = order?.id;
-
-      if (!airtableId) {
-        throw new Error("Erro ao criar o pedido. Tente novamente.");
-      }
-
-      // 6) Lógica específica para PIX
-      if (method === "pix") {
-        const pixKey = process.env.NEXT_PUBLIC_PIX_KEY;
-        const pixMerchant = process.env.NEXT_PUBLIC_PIX_MERCHANT;
-
-        if (!pixKey || !pixMerchant) {
-          throw new Error("Configurações PIX não encontradas.");
+        if (profileRow) {
+          // CORRIGIDO: Removido `as any` desnecessário
+          const fullProfile: Profile = {
+            ...profileRow,
+            email: session.user.email,
+          } as Profile; 
+          setProfile(fullProfile);
         }
-
-        const pix = buildPix({
-          key: pixKey,
-          merchant: pixMerchant,
-          city: city.trim() || "SAO PAULO", // Fallback seguro
-          amount: total,
-          txid: airtableId.slice(-10), // Usar parte do ID do Airtable como TXID
-        });
-
-        setPixCode(pix);
-        setStep("pix");
-        setOkMsg("Pedido criado com sucesso! Use o PIX abaixo para pagar.");
-      } else {
-        // Lógica de redirecionamento para gateway de cartão (simulado)
-        setOkMsg(
-          "Pedido criado. Você será redirecionado para o pagamento com cartão."
-        );
-        // Simulação de redirecionamento, na realidade, seria para um link de gateway.
-        setTimeout(() => {
-          router.replace(`/orders/${airtableId}?status=card_pending`);
-          clearBag(); // Limpa a sacola após o checkout
-        }, 1000);
       }
 
-      clearBag(); // Limpa a sacola após o checkout (mesmo para PIX)
-    } catch (e) {
-      const errorMsg =
-        e instanceof Error
-          ? e.message
-          : "Erro desconhecido ao finalizar o pedido.";
-      setErr(errorMsg);
-      setCreatingFor(null);
-    }
-  }
+      setLoading(false);
+    })();
+  }, []);
 
-  // Função para copiar o código PIX
-  async function copyPix() {
-    if (!pixCode) return;
+  // --- Handlers ---
+  const updateBag = (items: BagItem[]) => {
+    setBag(items);
+    if (items.length === 0) {
+      setCurrentStep("bag");
+    }
+  };
+
+  const updateQuantity = (id: string, qty: number) => {
+    updateBag(updateQty(id, qty));
+  };
+
+  const removeItem = (id: string) => {
+    updateBag(removeFromBag(id));
+  };
+
+  const copyPix = async () => {
     try {
       await navigator.clipboard.writeText(pixCode);
       setOkMsg("Código PIX copiado!");
+      setTimeout(() => setOkMsg(null), 2000);
     } catch {
-      setErr("Não foi possível copiar. Por favor, selecione e copie manualmente.");
+      setErr("Erro ao copiar o código. Tente manualmente.");
     }
-  }
+  };
 
-  // =====================================================
-  // RENDERIZAÇÃO
-  // =====================================================
+  // --- Checkout ---
+  const startCheckout = async () => {
+    if (!profile) return router.push("/auth?next=/bag");
+    if (!profile.street || !profile.number) return router.push("/profile");
 
-  if (items.length === 0 && step !== "pix") {
+    setCurrentStep("checkout");
+  };
+
+  const processPayment = async () => {
+    setCheckoutLoading(true);
+    setErr(null);
+    setOkMsg(null);
+    setIsPixReady(false);
+
+    try {
+      const orderData = {
+        Status: "Pending PIX Payment",
+        "User ID": profile!.id,
+        "User Email": profile!.email,
+        Name: profile!.name,
+        Whatsapp: profile!.whatsapp,
+        Address: `${profile!.street}, ${profile!.number} ${
+          profile!.complement || ""
+        }, ${profile!.bairro} - ${profile!.city}/${profile!.state} ${
+          profile!.cep
+        }`,
+        Items: JSON.stringify(
+          bag.map((item) => ({
+            name: item.name,
+            qty: item.qty,
+            price: item.price,
+            size: item.size,
+            store: item.store_name,
+          }))
+        ),
+        Subtotal: totals.subtotal,
+        Delivery: totals.delivery,
+        Fees: totals.fees,
+        Total: totals.total,
+        // Adicionais para rastreio
+        StoreCount: totals.uniqueStores,
+      };
+
+      const res = await createOrder(orderData);
+      const newOrderId = res.records[0].id;
+      setOrderId(newOrderId);
+
+      // --- Gera Código PIX ---
+      const PIX_KEY = process.env.NEXT_PUBLIC_PIX_KEY || "";
+      const PIX_MERCHANT =
+        process.env.NEXT_PUBLIC_PIX_MERCHANT || "LOOK PAGAMENTOS";
+      const PIX_CITY = process.env.NEXT_PUBLIC_PIX_CITY || "SAO PAULO";
+
+      if (!PIX_KEY) throw new Error("Chave PIX não configurada.");
+
+      let payload =
+        tlv("00", "01") + // Payload Format Indicator
+        tlv("01", "12") + // Point of Initiation Method: 12 (QR Estático)
+        tlv("26", // Merchant Account Information (MAI)
+          tlv("00", "BR.GOV.BCB.PIX") + // MAI: 00 (GUID PIX)
+          tlv("01", PIX_KEY) // MAI: 01 (Chave PIX)
+        ) +
+        tlv("52", "0000") + // Merchant Category Code
+        tlv("53", totals.total.toFixed(2)) + // Transaction Currency (BRL)
+        tlv("54", totals.total.toFixed(2)) + // Transaction Amount
+        tlv("58", "BR") + // Country Code
+        tlv("59", PIX_MERCHANT.toUpperCase().slice(0, 25)) + // Merchant Name
+        tlv("60", PIX_CITY.toUpperCase().slice(0, 15)) + // Merchant City
+        tlv("62", tlv("05", newOrderId.slice(0, 25))) + // Additional Data Field: 05 (Transaction ID)
+        "6304"; // CRC16
+
+      // Calcula e anexa o CRC
+      payload += crc16(payload);
+
+      setPixCode(payload);
+      setIsPixReady(true);
+      setCurrentStep("payment");
+
+      // Limpa a sacola (após a geração do pedido e PIX)
+      clearBag();
+      setBag([]);
+
+    } catch (e: any) {
+      setErr(e.message || "Ocorreu um erro ao processar o pagamento.");
+    } finally {
+      setCheckoutLoading(false);
+    }
+  };
+
+  // --- Renderização ---
+  if (loading) {
     return (
       <main className="min-h-screen bg-neutral-50 p-5 pt-10">
         <h1 className="text-3xl font-semibold tracking-tight text-black">
-          Your Bag
+          Sua Sacola
         </h1>
-        <div className="mt-8 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-          <p className="text-gray-600">Sua sacola está vazia.</p>
-          <Link
-            href="/"
-            className="mt-4 block w-full rounded-xl bg-black px-4 py-3 text-center text-sm font-semibold text-white shadow-sm transition active:scale-[0.99]"
-          >
-            Start Shopping
-          </Link>
-        </div>
+        <p className="mt-1 text-sm text-neutral-500">Carregando...</p>
+      </main>
+    );
+  }
+
+  // Sacola vazia
+  if (bag.length === 0 && currentStep !== "payment") {
+    return (
+      <main className="min-h-screen bg-neutral-50 p-5 pt-10">
+        <h1 className="text-3xl font-semibold tracking-tight text-black">
+          Sua Sacola
+        </h1>
+        <p className="mt-4 text-gray-600">Sua sacola está vazia.</p>
+        <Link
+          href="/"
+          className="mt-6 inline-block rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm"
+        >
+          Ir para o Catálogo
+        </Link>
         <BottomNav />
       </main>
     );
   }
 
   return (
-    <main className="canvas max-w-md mx-auto min-h-screen pb-24">
-      {/* Header */}
-      <div className="pt-6 px-5 flex items-center justify-between">
+    <main className="min-h-screen bg-neutral-50 pb-20">
+      <div className="p-5 pt-10">
         <h1 className="text-3xl font-semibold tracking-tight text-black">
-          {step === "review" ? "Your Bag" : "Checkout"}
+          Sua Sacola
         </h1>
-        {step === "confirm" && (
-          <button
-            onClick={() => setStep("review")}
-            className="text-sm text-neutral-600 underline"
-          >
-            Edit Bag
-          </button>
-        )}
+        <p className="mt-1 text-sm text-neutral-500">
+          {currentStep === "bag" && "Itens prontos para o checkout."}
+          {currentStep === "checkout" && "Verifique e confirme o pedido."}
+          {currentStep === "payment" && "Pagamento PIX."}
+        </p>
       </div>
 
-      {/* Passo 1: Revisão da Sacola (review) */}
-      {step === "review" && (
-        <div className="mt-6 px-5 space-y-6">
-          {/* Lista de Itens */}
-          <section className="space-y-4">
-            <h2 className="text-xl font-semibold">Items ({items.length})</h2>
-            <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5 space-y-4">
-              {items.map((item, i) => (
-                <div key={i} className="flex items-center space-x-4 border-b pb-4 last:border-b-0 last:pb-0">
-                  {/* Imagem */}
-                  <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-lg bg-neutral-100">
-                    {item.photo_url ? (
-                      <img
-                        src={
-                          Array.isArray(item.photo_url)
-                            ? item.photo_url[0]
-                            : item.photo_url
-                        }
-                        alt={item.name}
-                        className="h-full w-full object-cover"
-                      />
-                    ) : (
-                      <div className="grid h-full w-full place-items-center text-neutral-400">
-                        👜
-                      </div>
-                    )}
-                  </div>
+      {/* Passo 1: Revisão da Sacola */}
+      {currentStep === "bag" && (
+        <div className="px-5">
+          <div className="mt-6 space-y-4">
+            {bag.map((item) => (
+              <div
+                key={item.id}
+                className="flex gap-4 rounded-xl bg-white p-3 shadow-sm"
+              >
+                <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-lg bg-neutral-100 border border-neutral-200">
+                  <img
+                    src={item.image_url}
+                    alt={item.name}
+                    className="h-full w-full object-cover"
+                    loading="lazy"
+                  />
+                </div>
 
-                  {/* Detalhes */}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium line-clamp-2">
-                      {item.name}
-                    </p>
-                    <p className="text-xs text-neutral-500">
-                      {item.store_name}
-                    </p>
-                    <p className="text-xs font-semibold text-neutral-800 mt-1">
-                      {formatBRL(item.price)}
-                    </p>
-                  </div>
+                <div className="flex-1">
+                  <p className="text-sm font-semibold line-clamp-2">
+                    {item.name}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {item.store_name} • Tam: {item.size}
+                  </p>
+                  <p className="text-sm font-semibold mt-1">
+                    {formatBRL(item.price)}
+                  </p>
+                </div>
 
-                  {/* Qtd e Remover */}
-                  <div className="flex flex-col items-end space-y-1">
+                <div className="flex flex-col items-end justify-between">
+                  <button
+                    onClick={() => removeItem(item.id)}
+                    className="text-gray-400 hover:text-red-500"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                  <div className="flex items-center gap-2">
                     <button
-                      onClick={() => setItems(removeFromBag(item.id))}
-                      className="text-neutral-500 hover:text-red-500 transition-colors"
-                      title="Remover item"
+                      onClick={() => updateQuantity(item.id, item.qty - 1)}
+                      disabled={item.qty <= 1}
+                      className="btn-sq-sm"
                     >
-                      <Trash2 className="h-4 w-4" />
+                      <Minus className="h-4 w-4" />
                     </button>
-                    <div className="flex items-center rounded-full border border-neutral-200 bg-neutral-50">
-                      <button
-                        onClick={() =>
-                          setItems(updateQty(item.id, Math.max(1, item.qty - 1)))
-                        }
-                        disabled={item.qty <= 1}
-                        className="p-1.5 text-neutral-600 disabled:opacity-30"
-                      >
-                        <Minus className="h-3 w-3" />
-                      </button>
-                      <span className="w-5 text-center text-xs font-medium">
-                        {item.qty}
-                      </span>
-                      <button
-                        onClick={() => setItems(updateQty(item.id, item.qty + 1))}
-                        className="p-1.5 text-neutral-600"
-                      >
-                        <Plus className="h-3 w-3" />
-                      </button>
-                    </div>
+                    <span className="text-sm w-5 text-center">{item.qty}</span>
+                    <button
+                      onClick={() => updateQuantity(item.id, item.qty + 1)}
+                      className="btn-sq-sm"
+                    >
+                      <Plus className="h-4 w-4" />
+                    </button>
                   </div>
                 </div>
-              ))}
-              <div className="flex justify-end pt-2">
-                <button
-                  onClick={() => {
-                    clearBag();
-                    setItems([]);
-                  }}
-                  className="text-xs text-red-600 underline"
-                >
-                  Clear Bag
-                </button>
               </div>
-            </div>
-          </section>
+            ))}
+          </div>
 
-          {/* Resumo de Custos */}
-          <section className="space-y-4">
-            <h2 className="text-xl font-semibold">Summary</h2>
-            <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5 space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-neutral-600">Subtotal</span>
-                <span className="font-medium">{formatBRL(subtotal)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-neutral-600">Delivery ({uniqueStores.length} stores)</span>
-                <span className="font-medium">{formatBRL(delivery)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-neutral-600">Service Fee</span>
-                <span className="font-medium">{formatBRL(opFee)}</span>
-              </div>
-              <div className="pt-3 flex justify-between border-t border-neutral-100 mt-3 font-semibold text-lg">
-                <span>Total</span>
-                <span>{formatBRL(total)}</span>
-              </div>
+          <div className="mt-6 space-y-1 rounded-xl bg-white p-4 shadow-sm">
+            <div className="flex justify-between text-sm">
+              <span className="text-gray-600">Subtotal</span>
+              <span className="font-medium">{formattedTotals.subtotal}</span>
             </div>
-          </section>
+            <div className="flex justify-between text-sm">
+              <span className="text-gray-600">Taxas ({totals.uniqueStores}{" "}
+                {totals.uniqueStores > 1 ? "lojas" : "loja"})
+              </span>
+              <span className="font-medium">{formattedTotals.fees}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-gray-600">Frete</span>
+              <span className="font-medium">{formattedTotals.delivery}</span>
+            </div>
+            <div className="flex justify-between pt-2 border-t mt-2">
+              <span className="text-base font-semibold">Total</span>
+              <span className="text-lg font-bold text-black">
+                {formattedTotals.total}
+              </span>
+            </div>
+          </div>
 
-          {/* Botão de Checkout */}
           <button
-            onClick={handleContinue}
-            className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm transition active:scale-[0.99] disabled:opacity-60 mt-4"
-            disabled={items.length === 0}
+            onClick={startCheckout}
+            className="mt-6 w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-md transition active:scale-[0.99]"
           >
-            Continue to Checkout
+            {profile ? "Ir para o Checkout" : "Entrar para Comprar"}
           </button>
         </div>
       )}
 
-      {/* Passo 2: Confirmação e Endereço (confirm) */}
-      {step === "confirm" && (
-        <div className="mt-6 px-5 space-y-6">
-          <h2 className="text-xl font-semibold">Delivery Address</h2>
-
-          <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5 space-y-4">
-            {/* Endereço Form */}
-            <div className="space-y-3">
-              {/* CEP */}
-              <div>
-                <label className="mb-1 block text-sm font-medium text-neutral-800">
-                  CEP
-                </label>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  required
-                  value={cep}
-                  onChange={(e) => setCep(e.target.value)}
-                  maxLength={9}
-                  placeholder="00000-000"
-                  className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] text-neutral-900 placeholder:text-neutral-400 outline-none focus:ring-2 focus:ring-black/10"
-                />
-              </div>
-
-              {/* Rua */}
-              <div>
-                <label className="mb-1 block text-sm font-medium text-neutral-800">
-                  Street
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={street}
-                  onChange={(e) => setStreet(e.target.value)}
-                  placeholder="Rua, Avenida, etc."
-                  className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] text-neutral-900 placeholder:text-neutral-400 outline-none focus:ring-2 focus:ring-black/10"
-                />
-              </div>
-
-              {/* Número e Complemento */}
-              <div className="flex gap-4">
-                <div className="flex-1">
-                  <label className="mb-1 block text-sm font-medium text-neutral-800">
-                    Number
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={number}
-                    onChange={(e) => setNumber(e.target.value)}
-                    placeholder="100"
-                    className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] text-neutral-900 placeholder:text-neutral-400 outline-none focus:ring-2 focus:ring-black/10"
-                  />
+      {/* Passo 2: Confirmação do Checkout */}
+      {currentStep === "checkout" && profile && (
+        <div className="px-5 mt-6">
+          <div className="space-y-4">
+            <div className="rounded-xl bg-white p-4 shadow-sm">
+              <h3 className="text-sm font-semibold mb-2">Resumo do Pedido</h3>
+              <div className="space-y-1 text-sm text-gray-700">
+                <div className="flex justify-between">
+                  <span>Itens ({bag.length})</span>
+                  <span>{formattedTotals.subtotal}</span>
                 </div>
-                <div className="flex-1">
-                  <label className="mb-1 block text-sm font-medium text-neutral-800">
-                    Complement (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={complement}
-                    onChange={(e) => setComplement(e.target.value)}
-                    placeholder="Apto 101"
-                    className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] text-neutral-900 placeholder:text-neutral-400 outline-none focus:ring-2 focus:ring-black/10"
-                  />
+                <div className="flex justify-between">
+                  <span>Frete/Taxas</span>
+                  <span>{formatBRL(totals.delivery + totals.fees)}</span>
                 </div>
               </div>
-
-              {/* Bairro, Cidade, UF */}
-              <div className="space-y-3">
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-neutral-800">
-                    Neighborhood
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={neighborhood}
-                    onChange={(e) => setNeighborhood(e.target.value)}
-                    placeholder="Bairro"
-                    className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] text-neutral-900 placeholder:text-neutral-400 outline-none focus:ring-2 focus:ring-black/10"
-                  />
-                </div>
-                <div className="flex gap-4">
-                  <div className="flex-1">
-                    <label className="mb-1 block text-sm font-medium text-neutral-800">
-                      City
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={city}
-                      onChange={(e) => setCity(e.target.value)}
-                      placeholder="Cidade"
-                      className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] text-neutral-900 placeholder:text-neutral-400 outline-none focus:ring-2 focus:ring-black/10"
-                    />
-                  </div>
-                  <div className="w-20">
-                    <label className="mb-1 block text-sm font-medium text-neutral-800">
-                      UF
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={stateUf}
-                      onChange={(e) => setStateUf(e.target.value.toUpperCase())}
-                      maxLength={2}
-                      placeholder="SP"
-                      className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] text-neutral-900 placeholder:text-neutral-400 outline-none focus:ring-2 focus:ring-black/10 uppercase"
-                    />
-                  </div>
-                </div>
+              <div className="flex justify-between pt-2 border-t mt-2">
+                <span className="text-base font-semibold">Total a Pagar</span>
+                <span className="text-lg font-bold text-black">
+                  {formattedTotals.total}
+                </span>
               </div>
             </div>
 
-            {/* Mensagem de Serviceability */}
-            {!isServiceable(stateUf, city, cep) && (
-              <p className="mt-2 text-sm text-red-600">
-                {serviceabilityMsg(stateUf, city)}
+            <div className="rounded-xl bg-white p-4 shadow-sm">
+              <h3 className="text-sm font-semibold mb-2 flex justify-between">
+                <span>Entrega</span>
+                <Link href="/profile" className="text-xs text-blue-600 underline">
+                  Alterar
+                </Link>
+              </h3>
+              <p className="text-sm text-gray-700">
+                {profile.name} ({profile.whatsapp})
               </p>
-            )}
-
-            {err && (
-              <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
-                {err}
+              <p className="text-sm text-gray-700">
+                {profile.street}, {profile.number} {profile.complement}
               </p>
-            )}
-
-            {/* Opções de Pagamento */}
-            <div className="space-y-2 pt-4 border-t">
-              <h3 className="text-lg font-semibold">Payment Method</h3>
-              <p className="text-sm text-neutral-600">Total: <span className="font-bold text-black">{formatBRL(total)}</span></p>
-
-              <button
-                onClick={() => handleCheckout("pix")}
-                disabled={!canCheckout || creatingFor !== null}
-                className="w-full rounded-xl bg-green-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition active:scale-[0.99] disabled:opacity-60 flex items-center justify-center space-x-2"
-              >
-                {creatingFor === "pix" ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>Processing PIX…</span>
-                  </>
-                ) : (
-                  <span>Pay with PIX</span>
-                )}
-              </button>
-
-              <button
-                onClick={() => handleCheckout("card")}
-                disabled={!canCheckout || creatingFor !== null}
-                className="w-full rounded-xl border border-black bg-white px-4 py-3 text-sm font-semibold text-black shadow-sm transition active:scale-[0.99] disabled:opacity-60 flex items-center justify-center space-x-2"
-              >
-                {creatingFor === "card" ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>Processing Card…</span>
-                  </>
-                ) : (
-                  <span>Pay with Card</span>
-                )}
-              </button>
+              <p className="text-sm text-gray-700">
+                {profile.bairro}, {profile.city}-{profile.state} {profile.cep}
+              </p>
             </div>
           </div>
+
+          <button
+            onClick={processPayment}
+            disabled={checkoutLoading}
+            className="mt-6 w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-md transition active:scale-[0.99] disabled:opacity-60"
+          >
+            {checkoutLoading ? (
+              <Loader2 className="animate-spin inline-block mr-2 h-5 w-5" />
+            ) : (
+              "Confirmar e Gerar PIX"
+            )}
+          </button>
         </div>
       )}
 
-      {/* Passo 3: PIX Gerado (pix) */}
-      {step === "pix" && (
-        <div className="mt-6 px-5">
-          <h2 className="text-xl font-semibold">Payment with PIX</h2>
-          <div className="mt-4 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5 space-y-4 text-center">
-            <h3 className="text-lg font-bold text-black">
-              Total: {formatBRL(total)}
+      {/* Passo 3: Pagamento PIX */}
+      {currentStep === "payment" && (
+        <div className="px-5 mt-6">
+          <div className="rounded-xl bg-white p-4 shadow-sm text-center">
+            <h3 className="text-xl font-bold text-black mb-1">
+              {formattedTotals.total}
             </h3>
+            <p className="text-sm text-gray-700 mb-3">
+              Pedido **{orderId}** criado com sucesso.
+            </p>
 
-            {pixCode ? (
+            {isPixReady ? (
               <>
                 <p className="text-xs text-gray-700 mb-3">
                   Use o QR abaixo ou copie o código para pagar.
@@ -871,7 +489,7 @@ function BagPageInner() {
                     className="rounded-lg"
                   />
                 </div>
-                <div className="mt-3 text-left">
+                <div className="mt-3">
                   <label className="text-xs text-gray-600">
                     Copia e cola PIX
                   </label>
@@ -884,7 +502,7 @@ function BagPageInner() {
                   <div className="mt-2 flex flex-col space-y-2">
                     <button
                       onClick={copyPix}
-                      className="rounded-lg bg-black text-white px-3 py-2 text-sm font-semibold flex items-center justify-center space-x-2"
+                      className="rounded-lg bg-black text-white px-3 py-2 text-sm font-semibold flex items-center justify-center gap-2"
                     >
                       <Copy className="h-4 w-4" />
                       <span>Copiar código</span>
@@ -926,9 +544,9 @@ export default function BagPage() {
       fallback={
         <main className="min-h-screen bg-neutral-50 p-5 pt-10">
           <h1 className="text-3xl font-semibold tracking-tight text-black">
-            Your Bag
+            Sua Sacola
           </h1>
-          <p className="mt-1 text-sm text-neutral-600">Loading…</p>
+          <p className="mt-1 text-sm text-neutral-500">Carregando...</p>
         </main>
       }
     >

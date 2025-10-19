@@ -1,6 +1,18 @@
 // lib/data/dedupe.ts
 import type { Product } from "@/lib/data/types";
 
+// Definindo a extensão esperada do tipo Product para eliminar 'any'
+interface ProductExtended extends Product {
+  master_sku?: string | number | null;
+  global_sku?: string | number | null;
+  external_sku?: string | number | null;
+  brand?: string | null;
+  color?: string | null;
+  size?: string | null;
+  price_tag?: string | number | null;
+  distance_km?: number | null;
+}
+
 function norm(s: string) {
   return (s || "")
     .normalize("NFD")
@@ -9,22 +21,23 @@ function norm(s: string) {
     .toLowerCase();
 }
 
-function productKey(p: Product) {
+function productKey(p: Product): string {
+  const prod = p as ProductExtended; // Asserção única para o tipo estendido
+
   // Prioridades de chave únicas reais se existirem
-  const k1 =
-    (p as any).master_sku || (p as any).global_sku || (p as any).external_sku;
+  const k1 = prod.master_sku || prod.global_sku || prod.external_sku;
   if (k1) return String(k1).trim();
 
   // Fallback estável
   return [
-    norm((p as any).brand || ""),
+    norm(prod.brand || ""),
     norm(p.name || ""),
-    norm((p as any).color || ""),
-    norm((p as any).size || ""),
+    norm(prod.color || ""),
+    norm(prod.size || ""),
   ].join("|");
 }
 
-type Chosen = Product & { store_count?: number; stores?: string[] };
+type Chosen = ProductExtended & { store_count?: number; stores?: string[] };
 
 export function dedupeProducts(
   products: Product[],
@@ -35,9 +48,10 @@ export function dedupeProducts(
   for (const p of products) {
     const key = productKey(p);
     const existing = byKey.get(key);
+    const prod = p as ProductExtended; // Asserção para o objeto 'p' atual
 
     if (!existing) {
-      byKey.set(key, { ...p, store_count: 1, stores: [p.store_name] });
+      byKey.set(key, { ...prod, store_count: 1, stores: [p.store_name] });
       continue;
     }
 
@@ -49,19 +63,20 @@ export function dedupeProducts(
     const preferCheapest = opts?.preferCheapest ?? true;
 
     if (preferCheapest) {
-      const priceA = Number((existing as any).price_tag) || 0;
-      const priceB = Number((p as any).price_tag) || 0;
+      const existingProd = existing as ProductExtended;
+      const priceA = Number(existingProd.price_tag) || 0;
+      const priceB = Number(prod.price_tag) || 0;
       if (priceB < priceA) {
         // troca o card exibido pelo mais barato
         byKey.set(key, {
-          ...p,
+          ...prod,
           store_count: existing.store_count,
           stores: existing.stores,
         });
       }
     }
     // opcional: aqui você poderia preferir a loja mais próxima se já tiver distância calculada
-    // if ((p as any).distance_km < (existing as any).distance_km) ...
+    // if ((p as ProductExtended).distance_km < (existing as ProductExtended).distance_km) ...
   }
 
   return Array.from(byKey.values());

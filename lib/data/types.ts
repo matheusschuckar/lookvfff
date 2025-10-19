@@ -50,12 +50,10 @@ export type Product = {
   open_time?: string | null;
   close_time?: string | null;
   eta_text_default?: string | null;
-  eta_text_before_open?: string | null;
-  eta_text_after_close?: string | null;
+  eta_text_available?: string | null;
 
-  // métricas opcionais
-  view_count?: number | null;
-
-  // relação crua opcional (se a view incluir)
-  stores?: any;
+  // campos internos/view
+  master_sku?: string | null;
+  global_sku?: string | null;
+  external_sku?: string | null;
 };

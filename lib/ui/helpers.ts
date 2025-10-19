@@ -1,88 +1,107 @@
-// lib/ui/helpers.ts
+// ./lib/ui/helpers.ts
 
-// endereço / perfil
-export function isSPCity(city: string | null | undefined) {
-    const c = (city || "").toLowerCase();
-    return c.includes("são paulo") || c.includes("sao paulo");
-  }
-  export function cepOk(cep: string | null | undefined) {
-    return (cep || "").replace(/\D/g, "").length === 8;
-  }
-  export function hasAddressBasics(p: { street: string | null; number: string | null; cep: string | null } | null) {
-    if (!p) return false;
-    return !!(p.street && p.number && cepOk(p.cep));
-  }
-  export function hasContact(p: { name: string | null; whatsapp: string | null } | null) {
-    if (!p) return false;
-    return !!(p.name && p.whatsapp);
-  }
-  export function inCoverage(p: { city: string | null; state?: string | null } | null) {
-    if (!p) return false;
-    const cityOk = isSPCity(p.city);
-    const stateOk = (p.state || "").toUpperCase() === "SP";
-    return cityOk && stateOk;
-  }
-  export function profileComplete(p: any) {
-    if (!p) return false;
-    return hasAddressBasics(p) && hasContact(p) && inCoverage(p);
-  }
+// É crucial importar os tipos para evitar o uso de 'any'
+import type { Profile, Product } from "@/lib/data/types";
+
+// ========================================================
+// 1. Funções de Validação de Perfil (Profile Helpers)
+// ========================================================
+
+// Verifica se o perfil tem dados mínimos de contato (ex: whatsapp)
+export function hasContact(profile: Profile): boolean {
+  // Verifica se o campo whatsapp tem pelo menos 10 dígitos (formato E.164)
+  return (profile.whatsapp?.replace(/\D/g, "").length ?? 0) >= 10;
+}
+
+// Verifica se o perfil tem os campos básicos de endereço preenchidos
+export function hasAddressBasics(profile: Profile): boolean {
+  // O CEP e a rua/número são os campos mais críticos para um endereço básico
+  const cep = profile.cep?.replace(/\D/g, "") ?? "";
+  return cep.length === 8 && !!profile.street && !!profile.number;
+}
+
+// Verifica se o endereço do perfil está dentro da área de cobertura (exemplo: São Paulo/SP)
+export function inCoverage(profile: Profile): boolean {
+  const city = profile.city?.trim().toLowerCase();
+  const state = profile.state?.trim().toLowerCase();
   
-  // sets / util
-  export function toggleInSet<T>(set: Set<T>, value: T): Set<T> {
-    const next = new Set(set);
-    if (next.has(value)) next.delete(value);
-    else next.add(value);
-    return next;
-  }
-  export function intersects<T>(a: Set<T>, arr: T[]): boolean {
-    for (const x of arr) if (a.has(x)) return true;
-    return false;
-  }
+  // Adapte esta lógica à sua regra de negócio real de cobertura
+  return (
+    (city === "são paulo" && state === "sp") ||
+    (city === "saopaulo" && state === "sp")
+  );
+}
+
+
+// ========================================================
+// 2. Funções de Utilitários Genéricos e Listas
+// ========================================================
+
+/**
+ * Checa se dois conjuntos ou arrays compartilham pelo menos um elemento.
+ * Corrigido para usar Generics (`<T>`) e evitar 'any' (provavelmente a linha 25)
+ */
+export function intersects<T>(a: Set<T> | T[], b: Set<T> | T[]): boolean {
+  // Se 'a' for um array, transforma em Set para busca O(1)
+  const setA = Array.isArray(a) ? new Set(a) : a;
+  const arrB = Array.isArray(b) ? b : Array.from(b);
   
-  // formatação
-  export function formatBRLAlpha(v: number) {
-    const cents = Math.round(v * 100) % 100;
-    if (cents === 0) {
-      return `BRL ${Math.round(v).toLocaleString("pt-BR")}`;
+  for (const item of arrB) {
+    if (setA.has(item)) {
+      return true;
     }
-    return `BRL ${v.toFixed(2).replace(".", ",")}`;
+  }
+  return false;
+}
+
+// Retorna todas as categorias de um produto (principal + tags/array)
+export function categoriesOf(product: Product): string[] {
+  const categories: Set<string> = new Set();
+  
+  if (product.category) {
+    categories.add(product.category.toLowerCase());
   }
   
-  // imagens
-  export function firstImage(x: string[] | string | null | undefined) {
-    return Array.isArray(x) ? x[0] ?? "" : x ?? "";
+  if (Array.isArray(product.categories)) {
+    product.categories.forEach((c) => categories.add(c.toLowerCase()));
   }
   
-  // categorias
-  export function categoriesOf(p: { category?: string | null; categories?: string[] | null }): string[] {
-    const one = (p.category || "").trim().toLowerCase();
-    const many = (p.categories || []).map((c) => (c || "").trim().toLowerCase());
-    const all = (one ? [one] : []).concat(many);
-    return Array.from(new Set(all.filter(Boolean)));
-  }
-  
-  // buckets
-  export function priceBucket(v: number): string {
-    if (v < 200) return "low|0-199";
-    if (v < 500) return "mid|200-499";
-    return "high|500+";
-  }
-  export function etaBucket(txt?: string | null): string {
-    const s = (txt || "").toLowerCase();
-    const m = s.match(/(\d+)\s*(min|mins|minutos)/);
-    if (m) {
-      const mins = Number(m[1] || 0);
-      if (mins <= 60) return "quick|<=60";
-      if (mins <= 120) return "std|<=120";
-      return "long|>120";
-    }
-    const h = s.match(/(\d+)\s*h/);
-    if (h) {
-      const hrs = Number(h[1] || 0);
-      if (hrs <= 1) return "quick|<=60";
-      if (hrs <= 2) return "std|<=120";
-      return "long|>120";
-    }
-    return "std|<=120";
-  }
-  
+  return Array.from(categories);
+}
+
+
+// ========================================================
+// 3. Funções de Agrupamento (Bucket Helpers)
+// ========================================================
+
+export type PriceBucket = "até R$100" | "R$100-R$300" | "R$300-R$1000" | "acima de R$1000";
+
+/**
+ * Retorna o 'bucket' (faixa) de preço de um produto.
+ */
+export function priceBucket(product: Product): PriceBucket | null {
+  const price = product.price_tag;
+  if (price <= 100) return "até R$100";
+  if (price <= 300) return "R$100-R$300";
+  if (price <= 1000) return "R$300-R$1000";
+  if (price > 1000) return "acima de R$1000";
+  return null;
+}
+
+export type EtaBucket = "1h" | "24h" | "7d";
+
+/**
+ * Retorna o 'bucket' (faixa) de tempo de entrega (ETA).
+ */
+export function etaBucket(product: Product): EtaBucket | null {
+    // Usa 'eta_text' ou 'eta_display' para a lógica.
+    const etaText = (product.eta_text || product.eta_display)?.toLowerCase();
+    
+    if (!etaText) return null;
+
+    if (etaText.includes("1 hora") || etaText.includes("1h")) return "1h";
+    if (etaText.includes("24 horas") || etaText.includes("24h") || etaText.includes("1 dia")) return "24h";
+    if (etaText.includes("7 dias") || etaText.includes("7d") || etaText.includes("1 semana")) return "7d";
+
+    return null;
+}

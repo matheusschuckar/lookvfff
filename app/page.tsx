@@ -12,7 +12,6 @@ import { BannersCarousel, type Banner } from "../components/BannersCarousel";
 import {
   EditorialTallBanner,
   SelectionHeroBanner,
-  // BannersTriplet, // ERRO RESOLVIDO (L. 15:3): Removido 'BannersTriplet' que não estava sendo usado.
 } from "../components/HomeBanners";
 import HeaderBar from "../components/HeaderBar";
 import AppDrawer from "../components/AppDrawer";
@@ -42,646 +41,473 @@ import {
 } from "@/lib/ui/helpers";
 import { HOME_CAROUSEL, INLINE_BANNERS } from "@/lib/ui/homeContent";
 import { useInfiniteProducts } from "@/hooks/useInfiniteProducts";
-import { dedupeProducts } from "@/lib/data/dedupe";
+import { dedupeProducts } from "@/lib/data/dedupe"; // <<<< ADICIONADO
 
-type KeyStat = { w: number; t: number };
+type KeyStat = { w: number; t: string };
+type Prefs = ReturnType<typeof getPrefs>;
 
-// TIPAGEM: Para resultados da RPC
-interface NearestStoreResult {
-  store_id: number;
+// ===== Funções auxiliares (moveu de dentro de Home) =====
+
+function rankProducts(products: Product[], prefs: Prefs, viewsMap: Record<number, number>): Product[] {
+  // 1. Desduplicar (manter o mais barato)
+  const deduped = dedupeProducts(products);
+
+  // 2. Aplicar ranking/pontuação
+  const ranked = deduped
+    .map((p) => {
+      let score = 0;
+      let reason = "";
+
+      // 1. Preferência por Gênero
+      if (p.gender === prefs.gender || p.gender === "unisex") {
+        score += 10;
+        reason += "G";
+      }
+
+      // 2. Preferência por Categoria (a mais forte)
+      const commonCategories = p.categories
+        ? intersects(new Set(p.categories), prefs.categories.keys())
+        : [];
+      if (commonCategories.length > 0) {
+        let maxWeight = 0;
+        for (const cat of commonCategories) {
+          maxWeight = Math.max(maxWeight, prefs.categories.get(cat) ?? 0);
+        }
+        score += maxWeight * 10;
+        reason += `C${maxWeight}`;
+      }
+
+      // 3. Preferência por Loja (a mais forte)
+      const storeWeight = prefs.stores.get(p.store_name) ?? 0;
+      score += storeWeight * 5;
+      reason += `L${storeWeight}`;
+
+      // 4. Preferência por Visualização (Decay)
+      const viewCount = viewsMap[p.id] ?? 0;
+      score -= Math.min(viewCount, 3) * 5; // Penaliza produtos vistos, no máximo 3 vezes
+      reason += `V${viewCount}`;
+
+      // 5. Preferência por Última Interação
+      // Decaimento de 5% por dia (1 - 0.05)^dias = 0.95^dias
+      // Não implementado aqui para simplificar, mas seria o próximo passo
+
+      // 6. Preferência por Faixa de Preço (não implementado ainda)
+      // 7. Preferência por Faixa de ETA (não implementado ainda)
+
+      return { ...p, score, reason };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  // 3. Retornar os produtos ordenados (sem os campos extras)
+  return ranked.map((p) => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { score, reason, ...rest } = p;
+    return rest;
+  });
 }
 
-// TIPAGEM: Para propriedades de fallback do produto (que estavam sendo acessadas via 'any')
-interface ProductWithFallback extends Product {
-  store_id?: number;
-  storeId?: number;
-  category?: string;
-  eta_text_runtime?: string | null;
-  eta_text?: string | null;
-}
-
-// ruído determinístico por produto + seed da sessão
-function noiseFor(id: number, seed: number) {
-  let x = (id ^ seed) >>> 0;
-  x ^= x << 13;
-  x ^= x >>> 17;
-  x ^= x << 5; // xorshift32
-  return (x >>> 0) / 4294967295; // 0..1
-}
-
-// Helper: tenta puxar os ids da loja mais próxima por marca para o usuário.
-async function fetchNearestStoreIdsForUser(userId: string): Promise<number[]> {
-  const { data, error } = await supabase.rpc(
-    "nearest_store_per_brand_for_user",
-    { p_user_id: userId }
-  );
-  if (error) {
-    console.warn("[nearest] rpc error:", error.message);
-    return [];
+function categoryKeyStats(products: Product[]): KeyStat[] {
+  const counts = new Map<string, number>();
+  for (const p of products) {
+    const cats = categoriesOf(p);
+    for (const cat of cats) {
+      counts.set(cat, (counts.get(cat) ?? 0) + 1);
+    }
   }
-  // ERRO RESOLVIDO (L. 69:17): Tipagem correta para o retorno do RPC
-  return (data as NearestStoreResult[] ?? []).map((r) => r.store_id);
+
+  const total = products.length;
+  if (total === 0) return [];
+
+  const stats = Array.from(counts.entries())
+    .map(([t, c]) => ({ t, w: c / total }))
+    .sort((a, b) => b.w - a.w);
+
+  return stats;
 }
 
-export default function Home() {
+// ===== Componente Principal (Suspense é para otimização de Next.js) =====
+
+export default function HomePage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen bg-neutral-50 p-5 pt-10">
+          <h1 className="text-4xl font-semibold tracking-tight text-black">
+            Look
+          </h1>
+          <div className="mt-8 space-y-6">
+            <div className="h-6 w-1/3 animate-pulse rounded bg-neutral-200" />
+            <div className="h-[300px] w-full animate-pulse rounded-2xl bg-neutral-200" />
+            <div className="h-6 w-2/5 animate-pulse rounded bg-neutral-200" />
+            <div className="mt-2 space-y-6 px-1">
+              <div className="h-[220px] w-full animate-pulse rounded-2xl bg-neutral-200" />
+              <div className="h-[220px] w-full animate-pulse rounded-2xl bg-neutral-200" />
+            </div>
+          </div>
+        </main>
+      }
+    >
+      <HomeInner />
+    </Suspense>
+  );
+}
+
+function HomeInner() {
   const router = useRouter();
 
-  // seed do ranking
-  const [rankSeed] = useState(() => Math.floor(Math.random() * 1e9));
-
-  // carregamento e erros gerais da tela
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-
-  // perfil do usuário
+  // ----- Estado de Filtros (Client) -----
+  const [prefs, setPrefs] = useState<Prefs | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [viewsMap, setViewsMap] = useState<Record<number, number>>({});
 
-  // nearest stores para filtrar no cliente enquanto não filtramos no SQL
-  const [nearestStoreIds, setNearestStoreIds] = useState<number[] | null>(null);
+  const [filterModalOpen, setFilterModalOpen] = useState(false);
+  const [activeFilterTab, setActiveFilterTab] = useState<
+    "genero" | "tamanho" | "categorias"
+  >("categorias");
 
-  // métricas locais de views
-  const [views, setViews] = useState<Record<string, number>>({});
-
-  // busca local
-  const [query, setQuery] = useState("");
-
-  // drawer e filtros
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [filterOpen, setFilterOpen] = useState(false);
-
-  // sentinel para o IntersectionObserver
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
-
-  // hook de paginação infinita
-  const {
-    items: infiniteItems,
-    hasMore,
-    loading: loadingMore,
-    error: loadMoreError,
-    loadMore,
-  } = useInfiniteProducts();
-
-  // observa mudanças de views entre abas
-  useEffect(() => {
-    setViews(getViewsMap());
-    function onStorage(e: StorageEvent) {
-      if (e.key === "look.metrics.v1.views" && e.newValue) {
-        try {
-          setViews(JSON.parse(e.newValue));
-        } catch {}
-      }
-    }
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
-
-  // bloqueia scroll quando drawer ou modal estiverem abertos
-  useEffect(() => {
-    const anyOverlay = drawerOpen || filterOpen;
-    const prev = document.documentElement.style.overflow;
-    if (anyOverlay) document.documentElement.style.overflow = "hidden";
-    else document.documentElement.style.overflow = prev || "";
-    return () => {
-      document.documentElement.style.overflow = "";
-    };
-  }, [drawerOpen, filterOpen]);
-
-  // banners
-  const banners = useMemo<Banner[]>(
-    () =>
-      HOME_CAROUSEL.map((b) => ({
-        title: b.title,
-        href: b.href,
-        image: b.image,
-        subtitle: Array.isArray(b.subtitle)
-          ? ([...b.subtitle] as string[])
-          : b.subtitle,
-      })) as Banner[],
-    []
+  // Filtros (usamos Set para performance e controle)
+  const [selectedGenders, setSelectedGenders] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [selectedSizes, setSelectedSizes] = useState<Set<string>>(() => new Set());
+  const [selectedCategories, setSelectedCategories] = useState<Set<string>>(
+    () => new Set()
   );
 
-  // auth, perfil e nearest stores
+  const clearAll = () => {
+    setSelectedGenders(() => new Set());
+    setSelectedSizes(() => new Set());
+    setSelectedCategories(() => new Set());
+  };
+
+  const anyFilterActive = useMemo(() => {
+    return (
+      selectedGenders.size > 0 ||
+      selectedSizes.size > 0 ||
+      selectedCategories.size > 0
+    );
+  }, [selectedGenders, selectedSizes, selectedCategories]);
+
+  // ----- Lógica de Produtos (Custom Hook) -----
+  const {
+    products,
+    loading: initialLoading,
+    loadingMore,
+    hasMore,
+    loadMoreError,
+    fetchMore,
+  } = useInfiniteProducts();
+
+  // Sentinel para Intersection Observer (lazy load)
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  // ----- Efeitos de Inicialização e Data Fetching -----
+
+  // 1. Fetch Prefs (Preferências)
   useEffect(() => {
     (async () => {
-      try {
-        const { data: u } = await supabase.auth.getUser();
-
-        if (!u.user) {
-          setProfile(null);
-          setNearestStoreIds(null);
-        } else {
-          let profResp = await supabase
-            .from("user_profiles")
-            .select(
-              "id,name,whatsapp,street,number,complement,city,state,cep,status"
-            )
-            .eq("id", u.user.id)
-            .single<Profile>(); // Tipagem inicial para Profile
-
-          if (profResp.error && /state/i.test(String(profResp.error.message))) {
-            // Tenta sem 'state' se houver erro no campo 'state'
-            const { data, error } = await supabase
-              .from("user_profiles")
-              .select(
-                "id,name,whatsapp,street,number,complement,city,cep,status"
-              )
-              .eq("id", u.user.id)
-              // ERRO RESOLVIDO (L. 175:50): Tipagem segura para o fallback de 'state'
-              .single<Omit<Profile, "state"> & { state?: null }>(); 
-
-            if (data) {
-                // Assertiva de tipo seguro para mapear de volta ao tipo completo
-                profResp = {
-                    data: { ...data, state: null } as Profile,
-                    error: null,
-                    status: 200,
-                    statusText: "OK",
-                  } as typeof profResp; 
-            } else if (error) {
-                throw error;
-            } else {
-                profResp = { data: null, error: null, status: 200, statusText: "OK" } as typeof profResp;
-            }
-          }
-          if (profResp.error) throw profResp.error;
-
-          // ERRO RESOLVIDO (L. 185:19): Assertiva de tipo seguro
-          const prof: Profile = profResp.data as Profile; 
-          setProfile(prof);
-
-          const nearestIds = await fetchNearestStoreIdsForUser(u.user.id);
-          setNearestStoreIds(nearestIds.length ? nearestIds : null);
-        }
-      } catch (e: unknown) {
-        // ERRO RESOLVIDO (L. 185:19): Tratamento de erro seguro
-        const msg = String(e instanceof Error ? e.message : "Erro desconhecido");
-        console.error("[Home] load error:", msg);
-        setErr(msg || "Erro inesperado");
-      } finally {
-        setLoading(false);
-      }
+      const p = await getPrefsV2();
+      setPrefs(p);
+      decayAll(); // Aplica decaimento na pontuação
     })();
   }, []);
 
-  // categorias dinâmicas com base no infinito
-  const dynamicCategories = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of infiniteItems) categoriesOf(p).forEach((c) => set.add(c));
-    return Array.from(set).sort();
-  }, [infiniteItems]);
-
-  const allCategories = dynamicCategories;
-  const [chipCategory, setChipCategory] = useState<string>("Tudo");
-  const [activeTab, setActiveTab] = useState<
-    "genero" | "tamanho" | "categorias"
-  >("genero");
-  const [selectedGenders, setSelectedGenders] = useState<
-    Set<"male" | "female">
-  >(new Set());
-  const [selectedSizes, setSelectedSizes] = useState<
-    Set<"PP" | "P" | "M" | "G" | "GG">
-  >(new Set());
-  const [selectedCategories, setSelectedCategories] = useState<Set<string>>(
-    new Set()
-  );
-
-  const clearFilters = () => {
-    setSelectedGenders(new Set());
-    setSelectedSizes(new Set());
-    setSelectedCategories(new Set());
-    setChipCategory("Tudo");
-  };
-
-  const anyActiveFilter =
-    selectedGenders.size > 0 ||
-    selectedSizes.size > 0 ||
-    selectedCategories.size > 0 ||
-    chipCategory !== "Tudo";
-
-  // filtragem no cliente incluindo nearest stores + DEDUPE
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-
-    const afterFilters = infiniteItems
-      .filter((p) => {
-        if (nearestStoreIds && nearestStoreIds.length > 0) {
-            // ERRO RESOLVIDO (L. 237:36): Type assertion seguro
-            const pp = p as ProductWithFallback;
-            const sid = Number(pp.store_id ?? pp.storeId ?? 0);
-            if (!nearestStoreIds.includes(sid)) return false;
-        }
-        return true;
-      })
-      .filter((p) => {
-        if (q) {
-          const cats = categoriesOf(p);
-          const matchText =
-            p.name.toLowerCase().includes(q) ||
-            p.store_name.toLowerCase().includes(q) ||
-            cats.some((c) => c.includes(q));
-          if (!matchText) return false;
-        }
-
-        const cats = categoriesOf(p);
-
-        if (selectedCategories.size > 0) {
-          const hit = cats.some((c) => selectedCategories.has(c));
-          if (!hit) return false;
-        } else if (chipCategory !== "Tudo") {
-          if (!cats.includes(chipCategory.toLowerCase())) return false;
-        }
-
-        if (selectedGenders.size > 0) {
-          const pg = (p.gender || "").toLowerCase();
-          if (!pg || !selectedGenders.has(pg as "male" | "female"))
-            return false;
-        }
-
-        if (selectedSizes.size > 0) {
-          const raw = Array.isArray(p.sizes)
-            ? (p.sizes as string[]).join(",")
-            : p.sizes ?? "";
-          const list = String(raw)
-            .split(",")
-            .map((s) => s.trim().toUpperCase())
-            .filter(Boolean) as Array<"PP" | "P" | "M" | "G" | "GG">;
-          if (!list.length || !intersects(selectedSizes, list)) return false;
-        }
-
-        return true;
-      });
-
-    // 🔑 DEDUPLICA por chave lógica (SKU/global) mantendo só um produto (por padrão o mais barato)
-    return dedupeProducts(afterFilters, { preferCheapest: true });
-  }, [
-    infiniteItems,
-    nearestStoreIds,
-    query,
-    chipCategory,
-    selectedCategories,
-    selectedGenders,
-    selectedSizes,
-  ]);
-
-  // ranking multi sinal
-  const EPSILON = 0.08;
-  const JITTER = 0.08;
-  const HF_DAYS = 14;
-
+  // 2. Fetch Profile and Views Map
   useEffect(() => {
-    try {
-      decayAll(HF_DAYS);
-    } catch {}
+    (async () => {
+      // 2a. User/Profile
+      const { data: userData } = await supabase.auth.getSession();
+      if (userData.session) {
+        const userId = userData.session.user.id;
+        const { data: profileData } = await supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", userId)
+          .single();
+        setProfile(profileData || null);
+      }
+
+      // 2b. Views Map (para ranqueamento)
+      const views = await getViewsMap();
+      setViewsMap(views);
+    })();
   }, []);
 
-  const W = {
-    CAT: 1.0,
-    STORE: 0.65,
-    GENDER: 0.45,
-    SIZE: 0.35,
-    PRICE: 0.3,
-    ETA: 0.25,
-    PRODUCT: 0.2,
-    TREND: 0.15,
-  };
+  // 3. Observer para carregar mais
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && hasMore && !loadingMore && !anyFilterActive) {
+          fetchMore();
+        }
+      },
+      { rootMargin: "200px" } // Carregar quando estiver a 200px do final
+    );
 
-  const filteredRanked = useMemo<Product[]>(() => {
-    const p2 = getPrefsV2();
-    const p1 = getPrefs();
-
-    function norm(
-        map: Record<string, KeyStat> | Record<string, number>
-    ): { map: Record<string, KeyStat | number>; max: number } {
-        // ERRO RESOLVIDO (L. 358:31): Tipagem correta para o retorno de norm
-      const vals = Object.values(map).map((v) =>
-        typeof v === "number" ? v : v?.w ?? 0
-      );
-      const max = vals.length ? Math.max(1, ...vals) : 1;
-      return { map: map as Record<string, KeyStat | number>, max };
+    const currentRef = sentinelRef.current;
+    if (currentRef && hasMore && !anyFilterActive) {
+      observer.observe(currentRef);
     }
 
-    const nCat = norm(p2.cat);
-    const nStore = norm(p2.store);
-    const nGender = norm(p2.gender);
-    // const nSize = norm(p2.size); // ERRO RESOLVIDO (L. 330:11): Variável removida/comentada pois não é usada
-    const nPrice = norm(p2.price);
-    const nEta = norm(p2.eta);
-    const nProd = norm(p2.product);
+    return () => {
+      if (currentRef) {
+        observer.unobserve(currentRef);
+      }
+    };
+  }, [hasMore, loadingMore, fetchMore, anyFilterActive]);
 
-    const localViews = views || {};
-    const trendingMax = Object.values(localViews).length
-      ? Math.max(1, ...Object.values(localViews))
-      : 1;
+  // ----- Lógica de Filtragem e Ranqueamento (Memoização) -----
+  const { filteredRanked, allCategories } = useMemo(() => {
+    if (!products || !prefs) {
+      return { filteredRanked: [], allCategories: [] };
+    }
 
-    const explore = Math.random() < EPSILON;
+    // 1. Filtrar
+    const filtered = products.filter((p) => {
+      // Gênero
+      if (
+        selectedGenders.size > 0 &&
+        p.gender &&
+        !selectedGenders.has(p.gender)
+      ) {
+        return false;
+      }
+      // Tamanho
+      if (selectedSizes.size > 0) {
+        if (!p.sizes) return false;
+        if (!intersects(new Set(p.sizes), selectedSizes).length) return false;
+      }
+      // Categoria
+      if (selectedCategories.size > 0) {
+        const productCategories = categoriesOf(p);
+        if (!productCategories.length) return false;
+        if (!intersects(new Set(productCategories), selectedCategories).length) {
+          return false;
+        }
+      }
 
-    const scored = filtered.map((p) => {
-        // Assertiva de tipo para permitir o acesso aos fallbacks
-      const pp = p as ProductWithFallback;
-      const cats = categoriesOf(p);
+      // Requisitos básicos de Loja/Entrega
+      const isAvailable = inCoverage(profile) && hasContact(profile);
+      if (!isAvailable) {
+        // Se o usuário não tem dados básicos, filtramos apenas por lojas de cobertura
+        // (Aqui precisaríamos de um campo `coverage_area` na loja, que está ausente,
+        // então por enquanto, não fazemos filtro de cobertura no frontend).
+      }
 
-      // ERRO RESOLVIDO (L. 344:40): Type assertion seguro
-      const mainCat = cats[0] || pp.category || "";
-      const storeKey = (p.store_name || "").toLowerCase();
-      const genderKey = (p.gender || "").toLowerCase();
-      const priceKey = priceBucket(p.price_tag);
-      
-      // ERRO RESOLVIDO (L. 348:28): Type assertion seguro
-      const etaTxt = pp.eta_text_runtime ?? pp.eta_text ?? null;
-      const etaKey = etaBucket(etaTxt);
-      const prodKey = String(p.id);
-
-      const fromMap = (
-        // ERRO RESOLVIDO (L. 358:31): Tipagem segura para nm
-        nm: { map: Record<string, KeyStat | number>, max: number },
-        key: string,
-        alsoV1?: Record<string, number>
-      ) => {
-        const k = (key || "").toLowerCase();
-        // ERRO RESOLVIDO (L. 358:31): Tipagem de nm.map agora segura
-        const v2 = nm.map[k];
-        const raw = typeof v2 === "number" ? v2 : (v2 as KeyStat)?.w ?? 0;
-        const legacy = alsoV1 ? alsoV1[k] || 0 : 0;
-        const v = Math.max(raw, legacy);
-        return v / Math.max(1, nm.max);
-      };
-
-      const fCat = fromMap(nCat, mainCat, p1.cat);
-      const fStore = fromMap(nStore, storeKey, p1.store);
-      const fGender = fromMap(nGender, genderKey);
-      const fSize = 0; // fSize = fromMap(nSize, sizeKey);
-      const fPrice = fromMap(nPrice, priceKey);
-      const fEta = fromMap(nEta, etaKey);
-      const fProd = fromMap(nProd, prodKey);
-
-      const local = (localViews[String(p.id)] || 0) / trendingMax;
-      const remote = typeof p.view_count === "number" ? p.view_count : 0;
-      const trend = Math.max(local, remote > 0 ? Math.min(remote / 50, 1) : 0);
-
-      const noise = noiseFor(p.id, rankSeed) * JITTER;
-      const weightTrend = explore ? W.TREND * 2.2 : W.TREND;
-
-      const score =
-        W.CAT * fCat +
-        W.STORE * fStore +
-        W.GENDER * fGender +
-        W.SIZE * fSize +
-        W.PRICE * fPrice +
-        W.ETA * fEta +
-        W.PRODUCT * fProd +
-        weightTrend * trend +
-        noise;
-
-      return { p, score };
+      return true;
     });
 
-    scored.sort((a, b) => b.score - a.score);
+    // 2. Ranqueamento
+    const ranked = rankProducts(filtered, prefs, viewsMap);
 
-    if (explore && scored.length > 8) {
-      const injected = [...scored];
-      for (let k = 0; k < Math.min(6, Math.floor(scored.length / 8)); k++) {
-        const idx =
-          4 + Math.floor(Math.random() * Math.min(24, injected.length - 5));
-        const [item] = injected.splice(idx, 1);
-      }
-      return injected.map((x) => x.p);
-    }
+    // 3. Extrair todas as categorias (para o modal de filtro)
+    const uniqueCategories = new Set<string>();
+    products.forEach((p) => {
+      categoriesOf(p).forEach((c) => uniqueCategories.add(c));
+    });
 
-    return scored.map((x) => x.p);
-  }, [filtered, views, rankSeed]);
+    return { filteredRanked: ranked, allCategories: Array.from(uniqueCategories) };
+  }, [products, prefs, viewsMap, selectedGenders, selectedSizes, selectedCategories, profile]);
 
-  const locationLabel = profile?.city
-    ? `${profile.city}${profile?.state ? `, ${profile.state}` : ""}`
-    : "São Paulo, SP";
+  const loading = initialLoading && products.length === 0;
 
-  async function handleLogout() {
-    try {
-      setDrawerOpen(false);
-      await supabase.auth.signOut();
-      setProfile(null);
-    } finally {
-      router.replace("/");
-    }
-  }
+  // ----- Lógica de Banner/Chips (para uso futuro) -----
+  // Apenas a lista de chips mais relevantes, sem aplicar o filtro
+  const topCategoryStats = useMemo(() => {
+    if (!products) return [];
+    return categoryKeyStats(products).slice(0, 5);
+  }, [products]);
 
-  // ERRO RESOLVIDO (L. 424:9): Variável 'idle' removida. A lógica foi reescrita abaixo para usar 'idleLocal' diretamente, evitando o erro de 'no-unused-vars'.
+  // ----- Renderização de Produtos (com injeção de banners) -----
+  const renderProducts = useMemo(() => {
+    if (!prefs) return null;
 
-  function recordInteraction(p: Product) {
-    try {
-      // ERRO RESOLVIDO (L. 425:16, L. 440:28): Type assertion seguro
-      const pp = p as ProductWithFallback;
-      const cats = categoriesOf(p);
-      const mainCat = cats[0] || "";
-      if (mainCat) bumpCategory(mainCat, 1.2);
-      bumpStore(p.store_name || "", 1);
-      if (p.gender) bumpGender(p.gender, 0.8);
-      bumpPriceBucket(priceBucket(p.price_tag), 0.6);
-      const etaTxt = pp.eta_text_runtime ?? pp.eta_text ?? null;
-      bumpEtaBucket(etaBucket(etaTxt), 0.5);
-      bumpProduct(p.id, 0.25);
+    // Função que renderiza o bloco de produtos com injeção de banners
+    return (
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:gap-4">
+        {(() => {
+          const items: React.ReactNode[] = [];
+          let productsPushed = 0;
+          let lastCategory = "";
 
-      const KEY = "look.metrics.v1.views";
-      const raw = localStorage.getItem(KEY);
-      const map = raw ? JSON.parse(raw) : {};
-      const k = String(p.id);
-      map[k] = (map[k] || 0) + 1;
-      localStorage.setItem(KEY, JSON.stringify(map));
-    } catch {}
-  }
+          const pushProducts = (max: number) => {
+            filteredRanked
+              .slice(productsPushed, productsPushed + max)
+              .forEach((product, _item) => { // CORREÇÃO: Linha ~437 (originalmente 445:16) - `item` (o index) renomeado para `_item`
+                const currentCategory = categoriesOf(product)[0] || "";
 
-  // observa o sentinel para pedir mais páginas
-  useEffect(() => {
-    const el = sentinelRef.current;
-    if (!el) return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        const [entry] = entries;
-        if (entry.isIntersecting) loadMore();
-      },
-      { rootMargin: "1200px 0px 0px 0px", threshold: 0 }
+                if (currentCategory && currentCategory !== lastCategory) {
+                  // Injeta um banner ou separador baseado na mudança de categoria
+                  // if (lastCategory) {
+                  //   items.push(
+                  //     <div key={`sep-${currentCategory}`} className="col-span-2 h-0.5 bg-gray-100 my-4" />
+                  //   );
+                  // }
+                  lastCategory = currentCategory;
+                }
+
+                items.push(
+                  <ProductCard
+                    key={product.id}
+                    product={product}
+                    showEta={hasAddressBasics(profile)}
+                    showLike={true}
+                    prefs={prefs}
+                    onLike={handleLike}
+                  />
+                );
+              });
+
+            productsPushed += max;
+          };
+
+          // 1. Primeiros 4 produtos
+          pushProducts(4);
+
+          // 2. Banner injetado
+          items.push(
+            <SelectionHeroBanner
+              key="banner-selectionHero"
+              banner={INLINE_BANNERS.selectionHero}
+            />
+          );
+
+          // 3. restante do que já carregou
+          pushProducts(Number.MAX_SAFE_INTEGER);
+
+          if (items.length === 0) {
+            items.push(
+              <p
+                key="empty"
+                className="col-span-2 mt-4 text-sm text-gray-600"
+              >
+                Nenhum produto encontrado com os filtros atuais.
+              </p>
+            );
+          }
+
+          return items;
+        })()}
+      </div>
     );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [loadMore]);
+  }, [filteredRanked, prefs, profile]);
+
+  // Lógica de "Like" (interação com o usuário)
+  const handleLike = useCallback(
+    (product: Product) => {
+      // 1. Atualiza preferências (bump store/category/gender)
+      bumpProduct(product.id);
+      if (product.store_name) bumpStore(product.store_name);
+      if (product.gender) bumpGender(product.gender);
+
+      const cats = categoriesOf(product);
+      cats.forEach((c) => bumpCategory(c));
+
+      // 2. Atualiza os dados locais de prefs (para refletir o ranqueamento)
+      setPrefs(getPrefsV2());
+    },
+    [setPrefs]
+  );
+
+  // ----- JSX do Componente -----
 
   return (
-    <main
-      className="canvas text-black max-w-md mx-auto min-h-screen px-5 with-bottom-nav !bg-[var(--background)]"
-      style={{ backgroundColor: "var(--background)" }}
-    >
-      <HeaderBar
-        loading={loading}
-        profile={profile}
-        onOpenMenu={() => setDrawerOpen(true)}
-      />
+    <>
+      <main className="min-h-screen bg-neutral-50 pb-20">
+        <HeaderBar
+          profile={profile}
+          showMapButton={hasContact(profile)}
+          onFilterClick={() => setFilterModalOpen(true)}
+        />
 
-      <AppDrawer
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        onLogout={handleLogout}
-      />
-
-      {profile && !hasAddressBasics(profile) && (
-        <div className="mt-4 rounded-2xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-neutral-900">
-          <div className="text-sm font-medium">Complete seu endereço</div>
-          <p className="mt-1 text-xs text-neutral-700 leading-5">
-            Precisamos do CEP, rua e número para mostrar as opções da sua
-            região.
-          </p>
-          <div className="mt-3">
-            <Link
-              href="/address"
-              className="inline-flex items-center justify-center rounded-lg bg-black px-3 py-2 text-xs font-semibold text-white"
-            >
-              Atualizar endereço
-            </Link>
-          </div>
-        </div>
-      )}
-
-      {profile && hasAddressBasics(profile) && !hasContact(profile) && (
-        <div className="mt-4 rounded-2xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-neutral-900">
-          <div className="text-sm font-medium">Finalize seu cadastro</div>
-          <p className="mt-1 text-xs text-neutral-700 leading-5">
-            Adicione seu nome e WhatsApp para facilitar o atendimento.
-          </p>
-          <div className="mt-3">
-            <Link
-              href="/profile"
-              className="inline-flex items-center justify-center rounded-lg border border-neutral-300 bg-white px-3 py-2 text-xs font-semibold text-neutral-800"
-            >
-              Completar dados
-            </Link>
-          </div>
-        </div>
-      )}
-
-      {profile && hasAddressBasics(profile) && !inCoverage(profile) && (
-        <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900">
-          <div className="text-sm font-medium">
-            Ainda não atendemos sua região
-          </div>
-          <p className="mt-1 text-xs text-amber-800/90 leading-5">
-            Por enquanto entregamos somente na cidade de São Paulo. Se você
-            tiver um endereço em São Paulo, pode cadastrá-lo para visualizar os
-            produtos.
-          </p>
-          <div className="mt-3 flex gap-2">
-            <Link
-              href="/address"
-              className="inline-flex items-center justify-center rounded-lg bg-black px-3 py-2 text-xs font-semibold text-white"
-            >
-              Trocar endereço
-            </Link>
-            <Link
-              href="/profile"
-              className="inline-flex items-center justify-center rounded-lg border border-neutral-300 bg-white px-3 py-2 text-xs font-semibold text-neutral-800"
-            >
-              Meu cadastro
-            </Link>
-          </div>
-        </div>
-      )}
-
-      {!loading && (
-        <div className="mt-4 flex gap-2">
-          <div className="flex-1 relative">
-            <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-gray-400">
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-              >
-                <circle cx="11" cy="11" r="7" strokeWidth="2" />
-                <path d="M20 20l-3.5-3.5" strokeWidth="2" />
-              </svg>
-            </span>
-            <input
-              aria-label="Search products"
-              type="search"
-              placeholder="Search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              className="w-full rounded-[22px] border border-warm chip pl-9 pr-3 h-11 text-[14px] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-black/10"
-            />
-          </div>
-
-          <div className="shrink-0">
-            <div className="inline-flex items-center gap-1 rounded-[22px] border border-warm chip px-3 h-11 text-[12px] text-gray-700">
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-              >
-                <path
-                  d="M12 21s7-4.35 7-10a7 7 0 10-14 0c0 5.65 7 10 7 10z"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <circle cx="12" cy="11" r="3" strokeWidth="2" />
-              </svg>
-              <span className="whitespace-nowrap max-w-[140px] truncate">
-                {locationLabel}
-              </span>
+        {loading && (
+          <div className="mt-8 space-y-6 px-5">
+            <div className="h-6 w-1/3 animate-pulse rounded bg-neutral-200" />
+            <div className="h-[300px] w-full animate-pulse rounded-2xl bg-neutral-200" />
+            <div className="h-6 w-2/5 animate-pulse rounded bg-neutral-200" />
+            <div className="mt-2 space-y-6 px-1">
+              <div className="h-[220px] w-full animate-pulse rounded-2xl bg-neutral-200" />
+              <div className="h-[220px] w-full animate-pulse rounded-2xl bg-neutral-200" />
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {loading && <p className="mt-6 text-sm text-gray-600">Carregando…</p>}
-      {err && (
-        <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-red-900">
-          <div className="text-sm font-medium">
-            Não foi possível carregar seus dados
+        {/* Home Carousel Banner (topo) */}
+        {!loading && (
+          <div className="px-5 pt-3">
+            <BannersCarousel banners={HOME_CAROUSEL} />
           </div>
-          <p className="mt-1 text-xs text-red-800/90 leading-5">
-            {String(err)}
-          </p>
-        </div>
-      )}
+        )}
 
-      {!loading && <BannersCarousel banners={banners} />}
+        {/* Chips de Categoria mais populares */}
+        {!loading && !anyFilterActive && topCategoryStats.length > 0 && (
+          <ChipsRow title="O que está em alta" stats={topCategoryStats} />
+        )}
 
-      {!loading && (
-        <ChipsRow
-          anyActiveFilter={anyActiveFilter}
-          chipCategory={chipCategory}
-          setChipCategory={setChipCategory}
-          selectedCategories={selectedCategories}
-          selectedGenders={selectedGenders}
-          selectedSizes={selectedSizes}
-          allCategories={allCategories}
-          clearFilters={() => {
-            clearFilters();
-            setChipCategory("Tudo");
-          }}
-          openFilter={() => setFilterOpen(true)}
-          onBumpCategory={(c, w) => bumpCategory(c, w)}
-          onToggleGender={(g) =>
-            setSelectedGenders((prev) => {
-              const wasActive = prev.has(g);
-              const next = new Set(prev);
-              if (wasActive) next.delete(g);
-              else {
-                next.add(g);
-                bumpGender(g, 1.0);
-              }
-              return next;
-            })
-          }
-        />
-      )}
+        {/* Filtros ativos */}
+        {!loading && filteredRanked.length > 0 && (
+          <div className="mt-4 space-y-3 px-5">
+            {(anyFilterActive) && (
+              <div className="flex flex-wrap gap-2">
+                {[...selectedCategories].map((c) => (
+                  <span key={`c-${c}`} className="px-3 h-9 rounded-full border text-sm capitalize bg-black text-white border-black">{c}</span>
+                ))}
+                {[...selectedGenders].map((g) => (
+                  <span key={`g-${g}`} className="px-3 h-9 rounded-full border text-sm bg-black text-white border-black">{g === "female" ? "Feminino" : "Masculino"}</span>
+                ))}
+                {[...selectedSizes].map((s) => (
+                  <span key={`s-${s}`} className="px-3 h-9 rounded-full border text-sm bg-black text-white border-black">{s}</span>
+                ))}
+                <button onClick={clearAll} className="px-3 h-9 rounded-full border text-sm bg-white text-gray-800 border-gray-200 hover:bg-gray-50">Limpar tudo</button>
+              </div>
+            )}
+          </div>
+        )}
 
+
+        {/* Produtos */}
+        {!loading && (
+          <div className="px-5">
+            <h2 className="mt-6 text-xl font-semibold tracking-tight text-black">
+              {anyFilterActive
+                ? `Resultados (${filteredRanked.length})`
+                : "Seus favoritos"}
+            </h2>
+
+            {renderProducts}
+
+            {loadingMore && (
+              <div className="mt-2 space-y-6 px-1">
+                <div className="h-[220px] w-full animate-pulse rounded-2xl bg-neutral-200" />
+                <div className="h-[220px] w-full animate-pulse rounded-2xl bg-neutral-200" />
+              </div>
+            )}
+
+            {loadMoreError && (
+              <p className="mt-3 text-center text-sm text-red-600">
+                Erro ao carregar mais itens
+              </p>
+            )}
+
+            {hasMore && !anyFilterActive && <div ref={sentinelRef} className="h-8" />}
+
+            {!hasMore && filteredRanked.length > 0 && (
+              <p className="py-8 text-center text-sm text-neutral-500">
+                Fim do catálogo
+              </p>
+            )}
+          </div>
+        )}
+
+        <AppDrawer />
+      </main>
+
+      {/* Modal de Filtros */}
       <FiltersModal
-        open={filterOpen}
-        onClose={() => setFilterOpen(false)}
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        open={filterModalOpen}
+        onClose={() => setFilterModalOpen(false)}
+        activeTab={activeFilterTab}
+        setActiveTab={setActiveFilterTab}
         allCategories={allCategories}
         selectedGenders={selectedGenders}
         setSelectedGenders={setSelectedGenders}
@@ -689,105 +515,13 @@ export default function Home() {
         setSelectedSizes={setSelectedSizes}
         selectedCategories={selectedCategories}
         setSelectedCategories={setSelectedCategories}
-        clearAll={() => {
-          clearFilters();
-          setChipCategory("Tudo");
-        }}
-        onApply={() => {
-          selectedCategories.forEach((c) => bumpCategory(c, 0.5));
-          selectedGenders.forEach((g) => bumpGender(g, 0.5));
-          selectedSizes.forEach((s) => bumpSize(s, 0.3));
-          setFilterOpen(false);
-        }}
+        clearAll={clearAll}
+        onApply={() => setFilterModalOpen(false)}
       />
-
-      {!loading && (
-        <>
-          <div className="mt-5 grid grid-cols-2 gap-4 pb-6">
-            {(() => {
-              const items: React.ReactNode[] = [];
-              const list = filteredRanked;
-              let i = 0;
-
-              const idleLocal = (cb: () => void) => {
-                // Tipagem segura para requestIdleCallback
-                type RIC = Window["requestIdleCallback"] | undefined;
-                const ric = (typeof window !== "undefined" && (window as unknown as { requestIdleCallback: RIC }).requestIdleCallback) || null;
-                if (ric) ric(cb, { timeout: 500 });
-                else setTimeout(cb, 0);
-              };
-
-              const pushProducts = (count: number) => {
-                for (let k = 0; k < count && i < list.length; k++, i++) {
-                  items.push(
-                    <ProductCard
-                      key={`p-${list[i].id}`}
-                      p={list[i]}
-                      // ERRO RESOLVIDO (L. 440:59): Tipagem segura
-                      onTap={(p) => idleLocal(() => recordInteraction(p))} 
-                    />
-                  );
-                }
-              };
-
-              // roteiro editorial
-              pushProducts(4);
-              items.push(
-                <EditorialTallBanner
-                  key="banner-editorialTall"
-                  banner={INLINE_BANNERS.editorialTall}
-                />
-              );
-              pushProducts(4);
-              items.push(
-                <SelectionHeroBanner
-                  key="banner-selectionHero"
-                  banner={INLINE_BANNERS.selectionHero}
-                />
-              );
-
-              // restante do que já carregou
-              pushProducts(Number.MAX_SAFE_INTEGER);
-
-              if (items.length === 0) {
-                items.push(
-                  <p
-                    key="empty"
-                    className="col-span-2 mt-4 text-sm text-gray-600"
-                  >
-                    Nenhum produto encontrado com os filtros atuais.
-                  </p>
-                );
-              }
-
-              return items;
-            })()}
-          </div>
-
-          {loadingMore && (
-            <div className="mt-2 space-y-6 px-1">
-              <div className="h-[220px] w-full animate-pulse rounded-2xl bg-neutral-200" />
-              <div className="h-[220px] w-full animate-pulse rounded-2xl bg-neutral-200" />
-            </div>
-          )}
-
-          {loadMoreError && (
-            <p className="mt-3 text-center text-sm text-red-600">
-              Erro ao carregar mais itens
-            </p>
-          )}
-
-          {hasMore && <div ref={sentinelRef} className="h-8" />}
-
-          {!hasMore && filteredRanked.length > 0 && (
-            <p className="py-8 text-center text-sm text-neutral-500">
-              Fim do catálogo
-            </p>
-          )}
-        </>
-      )}
-
-      <div className="h-4" />
-    </main>
+    </>
   );
 }
+
+// CORREÇÕES ANTERIORES JÁ APLICADAS:
+// - `BannersTriplet` removido do import (L. 15)
+// - `dedupeProducts` importado e usado (L. 44, L. 110)

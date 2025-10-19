@@ -1,5 +1,15 @@
 // lib/airtableClient.ts
 
+// Tipagem para os dados de campos do Airtable (chaves dinâmicas)
+type AirtableRecordFields = Record<string, unknown>;
+
+// Tipagem para um registro retornado da API (usado em create e list)
+type AirtableResponseRecord = {
+  id: string;
+  fields: AirtableRecordFields;
+  createdTime?: string; // Opcional, pois só é retornado na listagem
+};
+
 // --- ENV (aceitamos alguns nomes antigos como fallback) ---
 const apiKey =
   process.env.NEXT_PUBLIC_AIRTABLE_API_KEY ||
@@ -38,7 +48,8 @@ function assertEnv() {
 }
 
 // ---------- Criar pedido ----------
-export async function createOrder(fields: Record<string, any>) {
+// CORRIGIDO: fields tipado com AirtableRecordFields
+export async function createOrder(fields: AirtableRecordFields) {
   assertEnv();
 
   const res = await fetch(apiBaseUrl, {
@@ -60,12 +71,14 @@ export async function createOrder(fields: Record<string, any>) {
     throw new Error(`Airtable ${res.status}: ${JSON.stringify(data)}`);
   }
 
+  // CORRIGIDO: Retorno tipado com AirtableResponseRecord
   return data as {
-    records: Array<{ id: string; fields: Record<string, any> }>;
+    records: Array<AirtableResponseRecord>;
   };
 }
 
 // ---------- Listar pedidos por e-mail ----------
+// CORRIGIDO: Retorno tipado com AirtableResponseRecord[]
 export async function listOrders(userEmail: string) {
   assertEnv();
 
@@ -84,9 +97,6 @@ export async function listOrders(userEmail: string) {
     throw new Error(`Airtable ${res.status}: ${JSON.stringify(data)}`);
   }
 
-  return (data.records || []) as Array<{
-    id: string;
-    fields: Record<string, any>;
-    createdTime: string;
-  }>;
+  // CORRIGIDO: Retorno tipado com AirtableResponseRecord[]
+  return (data.records || []) as Array<AirtableResponseRecord>;
 }

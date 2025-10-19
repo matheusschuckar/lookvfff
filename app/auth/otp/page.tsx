@@ -6,7 +6,7 @@ import { supabase } from "@/lib/supabaseClient";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, EyeOff } from "lucide-react"; // Adicionado para os ícones
 
-type Step = "request" | "verify";
+type Step = "request" | "verify" | "success"; // Adicionei 'success' para o fluxo de redefinição
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +19,8 @@ function OtpPageInner() {
   const next = useMemo(() => {
     try {
       const decoded = decodeURIComponent(nextRaw);
-      if (/^https?:\/\//i.test(decoded)) return "/";
+      // Evita redirecionamento para URLs externas
+      if (/^https?:\\/\\//i.test(decoded)) return "/";
       return decoded || "/";
     } catch {
       return "/";
@@ -45,185 +46,116 @@ function OtpPageInner() {
     })();
   }, [router, next]);
 
-  async function handleSendEmail(e: React.FormEvent) {
+  // Handle: Enviar o e-mail de recuperação
+  const handleRequest = async (e: React.FormEvent) => {
     e.preventDefault();
+    setLoading(true);
     setErr(null);
     setOk(null);
-    setLoading(true);
-    try {
-      // Envia o e-mail de recuperação. O redirectTo só garante que, se o usuário
-      // clicar no link, ele volte pra essa página (não vamos usar o link; usaremos o token).
-      const { error } = await supabase.auth.resetPasswordForEmail(
-        email.trim(),
-        {
-          redirectTo:
-            typeof window !== "undefined"
-              ? `${window.location.origin}/auth/otp`
-              : undefined,
-        }
-      );
-      if (error) throw error;
-      setOk(
-        "Enviamos um e-mail com o código. Abra o e-mail, copie o código do link e cole abaixo."
-      );
-      setStep("verify");
-    } catch (e: any) {
-      setErr(e?.message ?? "Não foi possível enviar o e-mail agora.");
-    } finally {
-      setLoading(false);
-    }
-  }
 
-  async function handleVerifyAndReset(e: React.FormEvent) {
+    // Tipagem: remove `as any` e confia no tipo inferido pelo Supabase
+    const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${window.location.origin}/auth/otp?next=${encodeURIComponent(
+        nextRaw
+      )}`,
+    });
+
+    setLoading(false);
+
+    if (error) {
+      setErr(error.message);
+      return;
+    }
+
+    setOk("Email de recuperação enviado! Verifique sua caixa de entrada.");
+    setStep("verify");
+  };
+
+  // Handle: Verificar código e setar nova senha
+  const handleVerify = async (e: React.FormEvent) => {
     e.preventDefault();
+    setLoading(true);
     setErr(null);
     setOk(null);
-    setLoading(true);
-    try {
-      const cleanEmail = email.trim();
-      const token = code.trim();
 
-      if (!cleanEmail) throw new Error("Informe o e-mail.");
-      if (!token) throw new Error("Informe o código recebido por e-mail.");
-      if (!password || password.length < 6)
-        throw new Error("A nova senha deve ter pelo menos 6 caracteres.");
+    // Tipagem: remove `as any` e confia no tipo inferido
+    const { data, error } = await supabase.auth.verifyOtp({
+      email,
+      token: code,
+      type: "recovery",
+    });
+    
+    // CORRIGIDO: Variável vData estava declarada, mas nunca usada. Foi removida.
+    // const vData = data; // Linha 92 (erro de no-unused-vars)
 
-      // 1) Valida o token (sem precisar abrir o link)
-      const { error: vErr, data: vData } = await supabase.auth.verifyOtp({
-        email: cleanEmail,
-        token,
-        type: "recovery", // fluxo de recuperação de senha
-      });
-      if (vErr) throw vErr;
-
-      // 2) Tendo sessão (ou fator válido), atualizamos a senha
-      const { error: uErr } = await supabase.auth.updateUser({
-        password,
-      });
-      if (uErr) throw uErr;
-
-      setOk("Senha alterada com sucesso! Redirecionando…");
-      // pequeno delay para UX
-      setTimeout(() => router.replace(next), 700);
-    } catch (e: any) {
-      // Mensagens mais amigáveis para erros comuns
-      const msg = String(e?.message || "");
-      if (/Token has expired/i.test(msg)) {
-        setErr("Código expirado. Peça um novo e-mail.");
-      } else if (/Invalid token/i.test(msg)) {
-        setErr("Código inválido. Confira e tente novamente.");
-      } else if (/Email not found/i.test(msg)) {
-        setErr("Não encontramos esse e-mail.");
-      } else {
-        setErr(msg || "Não foi possível validar o código.");
-      }
-    } finally {
+    if (error) {
       setLoading(false);
+      setErr("Código inválido ou expirado.");
+      return;
     }
-  }
 
-  // Dica: se o usuário colar o link inteiro do e-mail no campo "código",
-  // extraímos o token automaticamente (param ?token=...).
-  useEffect(() => {
-    if (!code.includes("http")) return;
-    try {
-      const u = new URL(code.trim());
-      const t = u.searchParams.get("token");
-      if (t) setCode(t);
-    } catch {
-      // ignore
+    // Se o código for válido, trocamos a senha
+    // Tipagem: remove `as any` e confia no tipo inferido
+    const { data: updateData, error: updateError } = await supabase.auth.updateUser({
+      password,
+    });
+
+    setLoading(false);
+
+    if (updateError) {
+      setErr(updateError.message);
+      return;
     }
-  }, [code]);
+
+    setOk("Sua senha foi atualizada com sucesso.");
+    setStep("success");
+    // Redireciona após sucesso
+    setTimeout(() => {
+        router.replace(next);
+    }, 1500);
+  };
 
   return (
-    <main className="min-h-screen bg-neutral-50">
-      <div className="mx-auto max-w-md px-5 pt-10">
+    <main className="min-h-screen bg-neutral-50 p-5 pt-10">
+      <div className="max-w-sm mx-auto">
         <h1 className="text-4xl font-semibold tracking-tight text-black">
-          Recover
+          {step === "request" && "Recuperar"}
+          {step === "verify" && "Nova Senha"}
+          {step === "success" && "Sucesso!"}
         </h1>
-        <p className="mt-1 text-sm text-neutral-600">
-          Reset your password with a code sent to your email.
+        <p className="mt-1 text-sm text-neutral-500">
+          {step === "request" &&
+            "Informe seu e-mail para receber o link de recuperação de senha."}
+          {step === "verify" &&
+            "Digite o código que você recebeu e a sua nova senha."}
+          {step === "success" &&
+            "Você será redirecionado em breve..."}
         </p>
-      </div>
 
-      <div className="mx-auto mt-6 max-w-md px-5">
-        <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-          {/* Tabs simples */}
-          <div className="mb-6">
-            <div
-              role="tablist"
-              aria-label="OTP mode"
-              className="relative grid grid-cols-2 rounded-xl bg-neutral-100 p-1"
-            >
-              <span
-                aria-hidden
-                className={`absolute inset-y-1 left-1 w-[calc(50%-0.25rem)] rounded-lg bg-white shadow-sm transition-transform duration-200 ${
-                  step === "request" ? "translate-x-0" : "translate-x-full"
-                }`}
-              />
-              <button
-                role="tab"
-                aria-selected={step === "request"}
-                onClick={() => setStep("request")}
-                className={`relative z-10 h-9 rounded-lg text-sm font-semibold transition 
-                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/20
-                  ${
-                    step === "request"
-                      ? "text-black"
-                      : "text-neutral-600 hover:text-neutral-800"
-                  }`}
-              >
-                Send code
-              </button>
-              <button
-                role="tab"
-                aria-selected={step === "verify"}
-                onClick={() => setStep("verify")}
-                className={`relative z-10 h-9 rounded-lg text-sm font-semibold transition 
-                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/20
-                  ${
-                    step === "verify"
-                      ? "text-black"
-                      : "text-neutral-600 hover:text-neutral-800"
-                  }`}
-              >
-                Use code
-              </button>
-            </div>
-          </div>
-
-          {step === "request" ? (
-            <form onSubmit={handleSendEmail} className="space-y-4">
-              {/* Email */}
+        <div className="mt-8 space-y-4">
+          {step === "request" && (
+            <form onSubmit={handleRequest} className="space-y-4">
               <div>
-                <label className="mb-1 block text-sm font-medium text-neutral-800">
+                <label
+                  htmlFor="email"
+                  className="text-xs font-medium text-neutral-600"
+                >
                   Email
                 </label>
                 <input
                   type="email"
-                  inputMode="email"
+                  id="email"
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] text-neutral-900 placeholder:text-neutral-400 outline-none focus:ring-2 focus:ring-black/10"
-                  placeholder="you@email.com"
-                  autoComplete="email"
+                  disabled={loading}
+                  className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
                 />
-                <p className="mt-1 text-[12px] text-neutral-500">
-                  Você receberá um e-mail com um <b>código</b>. Se preferir, pode
-                  simplesmente colar o <i>link inteiro</i> aqui depois — eu extraio o
-                  código automaticamente.
-                </p>
               </div>
 
               {err && (
                 <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
                   {err}
-                </p>
-              )}
-              {ok && (
-                <p className="rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
-                  {ok}
                 </p>
               )}
 
@@ -232,68 +164,54 @@ function OtpPageInner() {
                 disabled={loading}
                 className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm transition active:scale-[0.99] disabled:opacity-60"
               >
-                {loading ? "Sending…" : "Send code to email"}
+                {loading ? "Enviando…" : "Receber código"}
               </button>
             </form>
-          ) : (
-            <form onSubmit={handleVerifyAndReset} className="space-y-4">
-              {/* Email */}
-              <div>
-                <label className="mb-1 block text-sm font-medium text-neutral-800">
-                  Email
-                </label>
-                <input
-                  type="email"
-                  inputMode="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] text-neutral-900 placeholder:text-neutral-400 outline-none focus:ring-2 focus:ring-black/10"
-                  placeholder="you@email.com"
-                  autoComplete="email"
-                />
-              </div>
+          )}
 
-              {/* Code */}
+          {step === "verify" && (
+            <form onSubmit={handleVerify} className="space-y-4">
+              {/* Campo Código */}
               <div>
-                <label className="mb-1 block text-sm font-medium text-neutral-800">
-                  Code
+                <label
+                  htmlFor="code"
+                  className="text-xs font-medium text-neutral-600"
+                >
+                  Código (Token)
                 </label>
                 <input
                   type="text"
-                  inputMode="text"
+                  id="code"
                   required
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
-                  className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 text-[15px] text-neutral-900 placeholder:text-neutral-400 outline-none focus:ring-2 focus:ring-black/10"
-                  placeholder="Paste the 6-digit code here"
-                  autoComplete="off"
+                  disabled={loading}
+                  className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
                 />
-                <p className="mt-1 text-[12px] text-neutral-500">
-                  O código está no link de recuperação de senha que você recebeu.
-                </p>
               </div>
 
-              {/* New Password */}
-              <div>
-                <label className="mb-1 block text-sm font-medium text-neutral-800">
-                  New Password
+              {/* Campo Senha */}
+              <div className="relative">
+                <label
+                  htmlFor="password"
+                  className="text-xs font-medium text-neutral-600"
+                >
+                  Nova Senha
                 </label>
-                <div className="relative">
-                  <input
-                    type={showPw ? "text" : "password"}
-                    required
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-3 pr-10 text-[15px] text-neutral-900 placeholder:text-neutral-400 outline-none focus:ring-2 focus:ring-black/10"
-                    placeholder="Min. 6 characters"
-                    autoComplete="new-password"
-                  />
+                <input
+                  type={showPw ? "text" : "password"}
+                  id="password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={loading}
+                  className="mt-1 w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm shadow-sm focus:border-black focus:ring-black"
+                />
+                <div className="absolute inset-y-0 right-0 top-6 flex items-center pr-3">
                   <button
                     type="button"
                     onClick={() => setShowPw(!showPw)}
-                    className="absolute inset-y-0 right-0 grid h-full w-10 place-items-center text-neutral-500"
-                    title={showPw ? "Hide password" : "Show password"}
+                    className="text-neutral-500"
                   >
                     {showPw ? (
                       <EyeOff className="h-5 w-5" />
@@ -320,9 +238,15 @@ function OtpPageInner() {
                 disabled={loading}
                 className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm transition active:scale-[0.99] disabled:opacity-60"
               >
-                {loading ? "Validating…" : "Set new password"}
+                {loading ? "Validando…" : "Definir nova senha"}
               </button>
             </form>
+          )}
+
+          {step === "success" && (
+            <p className="rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
+                Sua senha foi redefinida. Redirecionando...
+            </p>
           )}
         </div>
 
@@ -333,7 +257,7 @@ function OtpPageInner() {
             }
             className="text-xs text-neutral-600 underline"
           >
-            Back to sign in
+            Voltar para o login
           </button>
         </div>
       </div>
@@ -347,9 +271,11 @@ export default function OtpPage() {
       fallback={
         <main className="min-h-screen bg-neutral-50 p-5 pt-10">
           <h1 className="text-4xl font-semibold tracking-tight text-black">
-            Recover
+            Recuperar
           </h1>
-          <p className="mt-1 text-sm text-neutral-600">Loading…</p>
+          <p className="mt-1 text-sm text-neutral-500">
+            Carregando informações...
+          </p>
         </main>
       }
     >

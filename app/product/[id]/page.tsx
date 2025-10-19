@@ -1,40 +1,24 @@
 // app/product/[id]/page.tsx
 "use client";
 
-// CORRIGIDO: O Client Component DEVE usar o cliente Supabase de cliente,
-// não o de servidor (@/lib/supabase/server).
+// Importações necessárias
 import { supabase } from "@/lib/supabaseClient"; 
-
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter, notFound } from "next/navigation"; 
 import Image from "next/image";
-import { Copy, Plus, Minus, Loader2 } from "lucide-react";
-import Link from "next/link"; // Adicionado Link
-
-// CORRIGIDO: Mudança de caminhos absolutos (@/components/...) para caminhos relativos (../components/...).
-// Se você quiser manter os caminhos absolutos (@/), certifique-se de que o seu `tsconfig.json` está configurado corretamente.
-// Caso contrário, use estes caminhos:
-import Header from "../../../components/Header";
-import Container from "../../../components/Container";
-import ProductDetails from "../../../components/ProductDetails";
-import StoreList from "../../../components/StoreList";
-import RelatedProducts from "../../../components/RelatedProducts";
-
-import { addToBag } from "@/lib/bag"; // Assumindo que este caminho está correto
-
-// OBS: Mantive as funções auxiliares (get/dedupe) no arquivo por simplicidade
-// mas o ideal é que elas estivessem na lib/data/catalog.ts
-import { dedupeProducts } from "@/lib/data/dedupe"; // Assumindo este caminho
+import Link from "next/link";
+import { Copy, Plus, Minus, Loader2, ChevronLeft } from "lucide-react"; // ChevronLeft adicionado
+import { addToBag } from "@/lib/bag"; 
+import { dedupeProducts } from "@/lib/data/dedupe"; 
 
 // =======================================================
-// Tipagens (Ajustadas para ser Client-Side)
+// Tipagens (Manter)
 // =======================================================
 
-// Tipagem básica de produto (ajustada para ser mais simples para este contexto)
 export type Product = {
   id: number;
   name: string;
-  description: string; // Descrição longa
+  description: string; 
   store_name: string;
   store_id: number;
   photo_url: string[] | string | null;
@@ -46,7 +30,6 @@ export type Product = {
   related_products?: number[] | null;
 };
 
-// Tipagem para dados da loja, eliminando 'as any' em store_data
 type StoreData = {
   id: string;
   name: string;
@@ -54,22 +37,19 @@ type StoreData = {
   address: string | null;
 };
 
-// Produto estendido com dados da loja e contagem de lojas
 type ExtendedProduct = Product & {
   store_data: StoreData;
   store_count?: number;
 };
 
-// Tipagem para a função de catálogo
 type CatalogProduct = Product & {
-    // Campos necessários para a agregação/deduplicação que podem vir do banco
     master_sku?: string;
     global_sku?: string;
     external_sku?: string;
 };
 
 // =======================================================
-// Funções Auxiliares (Simplificadas)
+// Funções Auxiliares (Manter)
 // =======================================================
 
 function toCurrency(v?: number) {
@@ -88,7 +68,6 @@ function firstImage(x: string[] | string | null | undefined) {
     return Array.isArray(x) ? x[0] ?? "" : x;
 }
 
-// Funções de fetch (simuladas aqui para evitar dependência de server functions)
 async function getProduct(id: string): Promise<CatalogProduct | null> {
     const { data, error } = await supabase
         .from("products_catalog")
@@ -116,8 +95,23 @@ async function getProductsInStore(storeId: number, currentProductId: number): Pr
         return [];
     }
     
-    // Limita a 4 para não sobrecarregar
     return (data as CatalogProduct[] || []).slice(0, 4); 
+}
+
+// =======================================================
+// Funções de UI (Componentes substituídos)
+// =======================================================
+
+// Substitui Container e Header
+function SimpleHeader({ title, onBack }: { title: string; onBack: () => void }) {
+    return (
+        <div className="sticky top-0 z-20 bg-white border-b py-4 px-5 flex items-center">
+            <button onClick={onBack} className="absolute left-4 p-2">
+                <ChevronLeft size={24} />
+            </button>
+            <h1 className="flex-1 text-center text-lg font-semibold tracking-tight">{title}</h1>
+        </div>
+    );
 }
 
 // =======================================================
@@ -125,7 +119,6 @@ async function getProductsInStore(storeId: number, currentProductId: number): Pr
 // =======================================================
 
 export default function ProductPage() {
-    // Certificando-se de que `id` é uma string simples
     const { id } = useParams<{ id: string }>();
     const productId = Array.isArray(id) ? id[0] : id;
 
@@ -153,7 +146,6 @@ export default function ProductPage() {
             setLoading(true);
             setError(null);
             
-            // Busca o produto (que pode ser duplicado)
             const p = await getProduct(productId);
             
             if (!p) {
@@ -161,28 +153,20 @@ export default function ProductPage() {
                 setLoading(false);
                 return;
             }
-
-            // O `dedupeProducts` recebe um array, mas aqui buscamos 1 produto.
-            // Para ter a contagem de outras lojas, precisaríamos de uma query mais complexa,
-            // mas para a correção de build, vamos usar o produto direto.
-            // Se o seu `getProduct` já retorna o produto 'master', está OK.
-            // Vou forçar a tipagem para passar o `extendedProduct`
             
             setProduct(p);
-            setSelectedSize(p.sizes?.[0] || null); // Seleciona o primeiro tamanho por padrão
+            setSelectedSize(p.sizes?.[0] || null);
             setLoading(false);
         }
 
         fetchProduct();
     }, [productId]);
 
-    // O produto exibido (simulando a extensão com StoreData)
     const extendedProduct: ExtendedProduct | null = useMemo(() => {
         if (!product) return null;
         
-        // Simulação de StoreData
         const storeData: StoreData = {
-            id: product.store_id.toString(), // Assumindo que store_id é um número
+            id: product.store_id.toString(),
             name: product.store_name,
             slug: product.store_name.toLowerCase().replace(/\s/g, "-"),
             address: "Endereço da Loja (exemplo)"
@@ -191,9 +175,10 @@ export default function ProductPage() {
         return {
             ...product,
             store_data: storeData,
-            store_count: 1, // Assumindo 1 loja para o produto singular buscado
+            store_count: 1, 
         };
     }, [product]);
+
 
     // Handle Add to Bag
     const handleAddToBag = () => {
@@ -225,18 +210,14 @@ export default function ProductPage() {
         }
     };
     
-    // Lista de Imagens
-    const images = useMemo(() => {
-        if (!product) return [];
-        if (Array.isArray(product.photo_url)) return product.photo_url;
-        if (typeof product.photo_url === 'string') return [product.photo_url];
-        return [];
-    }, [product]);
+    // =======================================================
+    // RENDERIZAÇÃO
+    // =======================================================
 
     if (loading) {
         return (
             <main className="min-h-screen p-5 pt-12">
-                <Header title="Produto" />
+                <SimpleHeader title="Produto" onBack={() => router.back()} />
                 <div className="flex justify-center items-center h-[50vh]">
                     <Loader2 className="animate-spin h-8 w-8 text-black" />
                 </div>
@@ -247,7 +228,7 @@ export default function ProductPage() {
     if (error || !extendedProduct) {
         return (
             <main className="min-h-screen p-5 pt-12">
-                <Header title="Produto" />
+                <SimpleHeader title="Produto" onBack={() => router.back()} />
                 <div className="mt-8">
                     <h2 className="text-xl font-semibold">Oops!</h2>
                     <p className="mt-2 text-gray-600">{error || "Este produto não foi encontrado."}</p>
@@ -257,15 +238,14 @@ export default function ProductPage() {
         );
     }
     
-    // Extrai o primeiro URL de imagem
     const primaryImage = firstImage(extendedProduct.photo_url);
-
 
     return (
         <main className="min-h-screen bg-neutral-50 pb-[100px]">
-            <Header title={extendedProduct.store_name} back />
+            {/* 1. Header (Substituído por SimpleHeader) */}
+            <SimpleHeader title={extendedProduct.store_name} onBack={() => router.back()} />
 
-            {/* Imagem principal */}
+            {/* 2. Imagem principal */}
             <div className="aspect-[4/5] w-full overflow-hidden bg-white relative">
                 {primaryImage ? (
                     <Image
@@ -283,30 +263,74 @@ export default function ProductPage() {
                 )}
             </div>
 
-            <Container>
-                {/* ProductDetails (Descrição, Tamanho, etc.) */}
-                <ProductDetails 
-                    product={extendedProduct} 
-                    selectedSize={selectedSize}
-                    setSelectedSize={setSelectedSize}
-                    price={toCurrency(extendedProduct.price_tag)}
-                />
+            {/* 3. Container (Substituído por div com mx-auto) */}
+            <div className="max-w-xl mx-auto p-5 space-y-8">
+                
+                {/* 3.1 ProductDetails (Conteúdo do componente ProductDetails) */}
+                <div>
+                    <h2 className="text-2xl font-bold tracking-tight">{extendedProduct.name}</h2>
+                    <p className="mt-1 text-sm text-gray-500">{extendedProduct.store_name}</p>
+                    <p className="mt-3 text-2xl font-semibold text-black">{toCurrency(extendedProduct.price_tag)}</p>
 
-                {/* Loja e outras lojas */}
-                {extendedProduct.store_data && (
-                    <StoreList store={extendedProduct.store_data} />
-                )}
+                    <div className="mt-4">
+                        <h3 className="text-sm font-semibold mb-2">Tamanho</h3>
+                        <div className="flex flex-wrap gap-2">
+                            {extendedProduct.sizes?.map((size) => (
+                                <button
+                                    key={size}
+                                    onClick={() => setSelectedSize(size)}
+                                    className={`px-4 py-2 rounded-full border text-sm font-medium transition ${
+                                        selectedSize === size 
+                                            ? "bg-black text-white border-black" 
+                                            : "bg-white text-gray-800 border-gray-300"
+                                    }`}
+                                >
+                                    {size}
+                                </button>
+                            ))}
+                        </div>
+                        {extendedProduct.sizes?.length === 0 && <p className="text-xs text-red-500">Tamanhos indisponíveis</p>}
+                    </div>
 
-                {/* Itens relacionados (A ser implementado no RelatedProducts) */}
-                <RelatedProducts 
-                    productId={extendedProduct.id}
-                    storeId={extendedProduct.store_id}
-                    getProductsInStore={getProductsInStore} // Passando a função
-                />
-            </Container>
+                    <div className="mt-6">
+                        <h3 className="text-sm font-semibold mb-2">Detalhes</h3>
+                        <p className="text-sm text-gray-700 whitespace-pre-line">
+                            {extendedProduct.description || "Descrição não fornecida."}
+                        </p>
+                    </div>
+
+                    {extendedProduct.eta_text && (
+                        <div className="mt-6 text-sm text-gray-600 border-t pt-4">
+                            Entrega estimada: **{extendedProduct.eta_text}**
+                        </div>
+                    )}
+                </div>
+
+                {/* 3.2 StoreList (Conteúdo do componente StoreList) */}
+                <div className="border-t pt-6">
+                    <h3 className="text-sm font-semibold mb-2">Vendido e Entregue por</h3>
+                    <div className="flex items-center justify-between p-4 bg-white border rounded-xl shadow-sm">
+                        <Link href={`/store/${extendedProduct.store_data.slug}`} className="text-lg font-bold text-black hover:underline">
+                            {extendedProduct.store_data.name}
+                        </Link>
+                        <span className="text-xs text-gray-500">
+                            {extendedProduct.store_count} loja(s)
+                        </span>
+                    </div>
+                </div>
+
+                {/* 3.3 RelatedProducts (Conteúdo do componente RelatedProducts - BÁSICO) */}
+                <div className="border-t pt-6">
+                    <h3 className="text-xl font-semibold mb-4">Outros itens de {extendedProduct.store_name}</h3>
+                    {/* Esta seção precisaria de um componente ou lógica complexa, aqui é um placeholder */}
+                    <p className="text-sm text-gray-600">
+                        *O componente RelatedProducts foi removido. A funcionalidade de produtos relacionados não está ativa neste código.*
+                    </p>
+                </div>
+            </div>
 
 
-            {/* Footer Fixo (Botão Comprar) */}
+            {/* 4. Footer Fixo (Botão Comprar - Manter) */}
             <div className="fixed bottom-0 left-0 right-0 z-10 bg-white border-t p-4 shadow-2xl">
                 <div className="max-w-md mx-auto">
                     <div className="flex items-center justify-between mb-2">
